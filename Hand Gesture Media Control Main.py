@@ -6,6 +6,7 @@ import pyautogui
 import time
 import pickle
 import os
+import csv
 from sklearn.naive_bayes import GaussianNB  # For continuous features
 # from sklearn.naive_bayes import MultinomialNB  # Alternative for discrete features
 
@@ -19,7 +20,7 @@ hands = mp_hands.Hands()
 mp_draw = mp.solutions.drawing_utils
 
 # Initialize Camera
-cap = cv2.VideoCapture(4)
+cap = cv2.VideoCapture(3)
 
 # Flag to track if we should exit the loop
 running = True
@@ -45,8 +46,9 @@ gesture_classes = {
 # Initialize the Naive Bayes classifier
 classifier = GaussianNB()
 
-# Model file path
+# File paths
 model_path = 'hand_gesture_model.pkl'
+csv_path = 'hand_gesture_data.csv'
 
 # Variables for collecting training data
 collecting_data = False
@@ -94,6 +96,59 @@ def extract_features(hand_landmarks):
     
     return features
 
+# Function to save training data to CSV
+def save_data_to_csv():
+    global training_data, training_labels
+    
+    if len(training_data) == 0 or len(training_labels) == 0:
+        print("No training data available to save to CSV.")
+        return False
+    
+    # Prepare header (feature names and label)
+    header = ['feature_1', 'feature_2', 'feature_3', 'feature_4', 'feature_5', 'feature_6', 'feature_7', 'gesture_class']
+    
+    # Prepare rows (combine features and label for each sample)
+    rows = []
+    for features, label in zip(training_data, training_labels):
+        row = features + [label]  # Combine features and label
+        rows.append(row)
+    
+    # Write to CSV file
+    with open(csv_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows(rows)
+    
+    print(f"Training data saved to {csv_path} ({len(rows)} samples)")
+    return True
+
+# Function to load training data from CSV
+def load_data_from_csv():
+    global training_data, training_labels
+    
+    if not os.path.exists(csv_path):
+        print("No CSV training data file found.")
+        return False
+    
+    training_data = []
+    training_labels = []
+    
+    # Read from CSV file
+    with open(csv_path, 'r') as f:
+        reader = csv.reader(f)
+        header = next(reader)  # Skip header
+        
+        for row in reader:
+            if len(row) >= 8:  # Ensure row has enough elements
+                features = [float(x) for x in row[:7]]  # First 7 columns are features
+                label = int(row[7])  # Last column is the class label
+                
+                training_data.append(features)
+                training_labels.append(label)
+    
+    print(f"Loaded {len(training_data)} samples from {csv_path}")
+    return True
+
 # Function to train the Naive Bayes model
 def train_model():
     global classifier, training_data, training_labels
@@ -109,27 +164,40 @@ def train_model():
     # Train the model
     classifier.fit(X, y)
     
-    # Save the model
+    # Save the model to pkl file
     with open(model_path, 'wb') as f:
         pickle.dump(classifier, f)
     
+    # Save training data to CSV
+    save_data_to_csv()
+    
     print(f"Model trained with {len(training_data)} samples and saved to {model_path}")
+    print(f"Training data saved to {csv_path}")
     return True
 
 # Function to load the model if it exists
 def load_model():
-    global classifier
+    global classifier, training_data, training_labels
     
+    # Try to load training data from CSV first
+    loaded_csv = load_data_from_csv()
+    
+    # Then try to load the model
     if os.path.exists(model_path):
         with open(model_path, 'rb') as f:
             classifier = pickle.load(f)
         print(f"Model loaded from {model_path}")
+        
+        # If we have training data but no model was loaded previously, train the model
+        if loaded_csv and len(training_data) > 0 and not classifier:
+            train_model()
+            
         return True
     else:
         print("No pre-trained model found.")
         return False
 
-# Try to load the existing model
+# Try to load the existing model and training data
 model_loaded = load_model()
 
 # Print instructions before starting the program
@@ -143,7 +211,8 @@ print("- Ring + Middle finger: Volume Down")
 print("\nTraining Mode Controls:")
 print("- Press 't' to toggle training data collection")
 print("- Press '0-6' to select the gesture class to collect")
-print("- Press 'm' to train the model")
+print("- Press 'm' to train the model (saves to both PKL and CSV)")
+print("- Press 's' to save training data to CSV without retraining")
 print("- ESC key: Exit program")
 
 while running and cap.isOpened():
@@ -262,9 +331,13 @@ while running and cap.isOpened():
         collecting_data = not collecting_data
         print(f"Data collection {'started' if collecting_data else 'stopped'}")
     
-    # 'm' key to train the model
+    # 'm' key to train the model and save to both PKL and CSV
     elif key == ord('m'):
         model_loaded = train_model()
+    
+    # 's' key to save data to CSV without retraining
+    elif key == ord('s'):
+        save_data_to_csv()
     
     # Number keys to select the gesture class for training
     elif key >= ord('0') and key <= ord('6'):
@@ -274,6 +347,10 @@ while running and cap.isOpened():
     # 'q' key as an alternative exit option
     elif key == ord('q'):
         running = False
+
+# Before exiting, save the training data to CSV if it's not empty
+if len(training_data) > 0:
+    save_data_to_csv()
 
 # Cleanup
 cap.release()
