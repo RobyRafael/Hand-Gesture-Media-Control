@@ -20,7 +20,7 @@ hands = mp_hands.Hands()
 mp_draw = mp.solutions.drawing_utils
 
 # Initialize Camera
-cap = cv2.VideoCapture(3)
+cap = cv2.VideoCapture(0)
 
 # Flag to track if we should exit the loop
 running = True
