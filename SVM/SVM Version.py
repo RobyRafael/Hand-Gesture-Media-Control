@@ -1,7 +1,6 @@
 import mediapipe as mp
 import cv2
 import numpy as np
-import math
 import pyautogui
 import time
 import pickle
@@ -11,24 +10,24 @@ from sklearn.svm import SVC
 import traceback  # Added for error tracking
 from datetime import datetime
 
-# Get the directory where the script is located
+# Mendapatkan direktori skrip saat ini
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
-# Create screenshots directory in the same folder as the script
+# Membuat direktori untuk menyimpan screenshot jika belum ada
 screenshots_dir = os.path.join(script_dir, 'gesture_screenshots')
 if not os.path.exists(screenshots_dir):
     os.makedirs(screenshots_dir)
     print(f"Created directory: {screenshots_dir}")
 
-# Initialize mediapipe hands module
+# Inisialisasi MediaPipe Hands
 mp_hands = mp.solutions.hands
 hands = mp_hands.Hands()
 mp_draw = mp.solutions.drawing_utils
 
-# Initialize Camera
-cap = cv2.VideoCapture(0)
+# Inisialisasi webcam
+cap = cv2.VideoCapture(1)
 
-# Flag to track if we should exit the loop
+# Memberikan pengkondisian aplikasi webcam terbuka
 running = True
 
 # Cooldown mechanism to prevent repeated key presses
