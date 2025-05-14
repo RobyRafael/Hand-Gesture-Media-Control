@@ -1,653 +1,869 @@
-import cv2
-import numpy as np
-import pyautogui
-import time
-import os
-import pickle
-import math
-from datetime import datetime
+import cv2  # Library untuk pemrosesan gambar
+import numpy as np  # Library untuk operasi numerik dan array
+import pyautogui  # Library untuk mengontrol keyboard dan mouse
+import time  # Library untuk fungsi waktu dan delay
+import os  # Library untuk operasi sistem dan file
+import pickle  # Library untuk menyimpan dan memuat objek Python
+import math  # Library untuk fungsi matematika
+import csv  # Library untuk membaca dan menulis file CSV
+from datetime import datetime  # Library untuk manajemen waktu dan tanggal
 
-# Directory setup
-script_dir = os.path.dirname(os.path.abspath(__file__))
-screenshots_dir = os.path.join(script_dir, 'custom_gesture_screenshots')
-if not os.path.exists(screenshots_dir):
-    os.makedirs(screenshots_dir)
-    print(f"Created directory: {screenshots_dir}")
+# Pengaturan direktori
+script_dir = os.path.dirname(os.path.abspath(__file__))  # Dapatkan lokasi file saat ini
+screenshots_dir = os.path.join(script_dir, 'custom_gesture_screenshots')  # Buat path untuk folder screenshot
+if not os.path.exists(screenshots_dir):  # Jika folder belum ada
+    os.makedirs(screenshots_dir)  # Buat folder tersebut
+    print(f"Created directory: {screenshots_dir}")  # Tampilkan pesan berhasil
 
-# Model paths
-model_path = os.path.join(script_dir, 'custom_hand_gesture_model.pkl')
-training_data_path = os.path.join(script_dir, 'custom_training_data.pkl')
+# Path untuk menyimpan model dan data
+model_path = os.path.join(script_dir, 'custom_svm_model.pkl')  # Path untuk file model SVM
+training_data_path = os.path.join(script_dir, 'custom_svm_training_data.pkl')  # Path untuk file data pelatihan
+csv_data_path = os.path.join(script_dir, 'custom_svm_training_data.csv')  # Path untuk file CSV data pelatihan
 
-# Gesture class mapping
+# Pemetaan kelas gerakan tangan
 gesture_classes = {
-    0: "No gesture detected",
-    1: "Play/Pause",
-    2: "Stop",
-    3: "Next Track",
-    4: "Previous Track",
-    5: "Volume Up",
-    6: "Volume Down"
+    0: "No gesture detected",  # Tidak ada gerakan terdeteksi
+    1: "Play/Pause",  # Untuk memulai/menghentikan sementara media
+    2: "Stop",  # Untuk menghentikan media
+    3: "Next Track",  # Untuk beralih ke trek berikutnya
+    4: "Previous Track",  # Untuk beralih ke trek sebelumnya
+    5: "Volume Up",  # Untuk menaikkan volume
+    6: "Volume Down"  # Untuk menurunkan volume
 }
 
-# Initialize webcam
-cap = cv2.VideoCapture(1)  # Try 0 if this doesn't work
-running = True
+# Inisialisasi webcam
+cap = cv2.VideoCapture(1)  # Mulai webcam dengan indeks 1 (ganti ke 0 jika tidak berfungsi)
+running = True  # Flag untuk menjalankan program
 
-# Action cooldown and tracking
-last_action_time = 0
-cooldown_time = 1.0  # seconds between actions
-previous_gesture = "No gesture detected"
+# Variabel untuk pengendalian aksi
+last_action_time = 0  # Waktu terakhir aksi dilakukan
+cooldown_time = 0.5  # Waktu jeda antar aksi (dalam detik)
+previous_gesture = "No gesture detected"  # Menyimpan gerakan sebelumnya
 
-# Training variables
-collecting_data = False
-training_data = []
-training_labels = []
-current_collection_class = 0
-sample_cooldown = 0
+# Variabel untuk pengumpulan data pelatihan
+collecting_data = False  # Status pengumpulan data (awalnya tidak aktif)
+training_data = []  # Daftar untuk menyimpan data fitur
+training_labels = []  # Daftar untuk menyimpan label kelas
+current_collection_class = 0  # Kelas gerakan yang sedang dikumpulkan
+sample_cooldown = 0  # Jeda antar pengambilan sampel
 
-# ============= CUSTOM HAND DETECTION AND FEATURE EXTRACTION =============
+# ============= DETEKSI TANGAN DAN EKSTRAKSI FITUR CUSTOM =============
 def detect_skin(frame):
-    """Detect skin using color segmentation in YCrCb space"""
-    # Convert to YCrCb
+    """Mendeteksi kulit menggunakan segmentasi warna dalam ruang YCrCb"""
+    # Konversi ke YCrCb
     ycrcb = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)
     
-    # Define skin color range for segmentation
-    lower_skin = np.array([0, 135, 85], dtype=np.uint8)
-    upper_skin = np.array([255, 180, 135], dtype=np.uint8)
+    # Tentukan rentang warna kulit untuk segmentasi
+    lower_skin = np.array([0, 135, 85], dtype=np.uint8)  # Batas bawah warna kulit
+    upper_skin = np.array([255, 180, 135], dtype=np.uint8)  # Batas atas warna kulit
     
-    # Create mask for skin color
+    # Buat mask untuk warna kulit
     mask = cv2.inRange(ycrcb, lower_skin, upper_skin)
     
-    # Apply morphological operations to clean up the mask
-    kernel = np.ones((5, 5), np.uint8)
-    mask = cv2.dilate(mask, kernel, iterations=2)
-    mask = cv2.erode(mask, kernel, iterations=2)
-    mask = cv2.GaussianBlur(mask, (5, 5), 0)
+    # Terapkan operasi morfologi untuk membersihkan mask
+    kernel = np.ones((5, 5), np.uint8)  # Kernel untuk operasi morfologi
+    mask = cv2.dilate(mask, kernel, iterations=2)  # Pelebaran untuk mengisi celah kecil
+    mask = cv2.erode(mask, kernel, iterations=2)  # Erosi untuk menghapus noise
+    mask = cv2.GaussianBlur(mask, (5, 5), 0)  # Penghalusan tepi
     
     return mask
 
 def find_contours(mask):
-    """Find contours in the mask"""
+    """Mencari kontur dalam mask"""
     contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     
-    # Find the largest contour (assuming it's the hand)
+    # Temukan kontur terbesar (diasumsikan sebagai tangan)
     if contours:
-        return max(contours, key=cv2.contourArea)
+        return max(contours, key=cv2.contourArea)  # Kembalikan kontur dengan area terbesar
     return None
 
 def find_convex_hull_and_defects(contour):
-    """Find convex hull and convexity defects of a contour"""
-    if contour is None or len(contour) < 5:
+    """Mencari convex hull dan convexity defects dari kontur"""
+    if contour is None or len(contour) < 5:  # Pastikan kontur valid
         return None, None, None
     
-    # Find convex hull
-    hull = cv2.convexHull(contour, returnPoints=False)
+    # Temukan convex hull
+    hull = cv2.convexHull(contour, returnPoints=False)  # Dapatkan indeks hull
     
-    # Find convexity defects
+    # Temukan convexity defects
     try:
-        defects = cv2.convexityDefects(contour, hull)
+        defects = cv2.convexityDefects(contour, hull)  # Dapatkan defects (celah antara jari)
     except:
         return contour, hull, None
     
     return contour, hull, defects
 
 def extract_features(contour, defects, frame_shape):
-    """Extract hand features from contour and defects"""
+    """Mengekstrak fitur tangan dari kontur dan defects"""
     if contour is None or defects is None:
         return None
     
-    # Initialize features
+    # Inisialisasi fitur
     features = []
     height, width, _ = frame_shape
     
-    # 1. Extract contour area and perimeter
-    area = cv2.contourArea(contour)
-    perimeter = cv2.arcLength(contour, True)
+    # 1. Ekstrak area dan perimeter kontur
+    area = cv2.contourArea(contour)  # Luas area tangan
+    perimeter = cv2.arcLength(contour, True)  # Panjang keliling tangan
     
-    # Normalize by frame dimensions
-    normalized_area = area / (height * width)
+    # Normalisasi berdasarkan dimensi frame
+    normalized_area = area / (height * width)  # Area dinormalisasi
     features.append(normalized_area)
     
-    # 2. Calculate convexity (ratio of contour area to convex hull area)
+    # 2. Hitung convexity (rasio area kontur terhadap area convex hull)
     hull = cv2.convexHull(contour, returnPoints=True)
     hull_area = cv2.contourArea(hull)
     if hull_area > 0:
-        convexity = area / hull_area
+        convexity = area / hull_area  # Rasio convexity
         features.append(convexity)
     else:
         features.append(0)
     
-    # 3. Find convexity defects (space between fingers)
-    finger_count = 0
-    defect_distances = []
+    # 3. Temukan convexity defects (ruang antara jari)
+    finger_count = 0  # Hitungan jari
+    defect_distances = []  # Jarak defects
     
-    # Find the centroid of the contour
+    # Temukan centroid (pusat massa) kontur
     M = cv2.moments(contour)
     if M["m00"] != 0:
-        cx = int(M["m10"] / M["m00"])
-        cy = int(M["m01"] / M["m00"])
+        cx = int(M["m10"] / M["m00"])  # Koordinat x pusat
+        cy = int(M["m01"] / M["m00"])  # Koordinat y pusat
     else:
         cx, cy = 0, 0
     
-    # Process defects to find finger-like structures
+    # Proses defects untuk menemukan struktur seperti jari
     if defects is not None and len(defects) > 0:
         for i in range(defects.shape[0]):
-            s, e, f, d = defects[i, 0]
-            start = tuple(contour[s][0])
-            end = tuple(contour[e][0])
-            far = tuple(contour[f][0])
+            s, e, f, d = defects[i, 0]  # Start, end, far point, dan distance
+            start = tuple(contour[s][0])  # Titik awal
+            end = tuple(contour[e][0])  # Titik akhir
+            far = tuple(contour[f][0])  # Titik terjauh
             
-            # Calculate distances between points
-            dist_to_center = math.sqrt((far[0] - cx)**2 + (far[1] - cy)**2)
-            normalized_dist = dist_to_center / math.sqrt(width**2 + height**2)
+            # Hitung jarak antar titik
+            dist_to_center = math.sqrt((far[0] - cx)**2 + (far[1] - cy)**2)  # Jarak ke pusat
+            normalized_dist = dist_to_center / math.sqrt(width**2 + height**2)  # Normalisasi jarak
             defect_distances.append(normalized_dist)
             
-            # Count potential fingers using angle
-            a = math.sqrt((end[0] - start[0])**2 + (end[1] - start[1])**2)
-            b = math.sqrt((far[0] - start[0])**2 + (far[1] - start[1])**2)
-            c = math.sqrt((end[0] - far[0])**2 + (end[1] - far[1])**2)
+            # Hitung jumlah jari potensial menggunakan sudut
+            a = math.sqrt((end[0] - start[0])**2 + (end[1] - start[1])**2)  # Sisi a segitiga
+            b = math.sqrt((far[0] - start[0])**2 + (far[1] - start[1])**2)  # Sisi b segitiga
+            c = math.sqrt((end[0] - far[0])**2 + (end[1] - far[1])**2)  # Sisi c segitiga
             
-            # Apply cosine law to find angle
+            # Terapkan hukum kosinus untuk menemukan sudut
             if a*b > 0:
-                angle = math.acos((b**2 + c**2 - a**2) / (2*b*c))
+                angle = math.acos((b**2 + c**2 - a**2) / (2*b*c))  # Hitung sudut
                 
-                # If angle is less than 90 degrees, it might be space between fingers
+                # Jika sudut kurang dari 90 derajat, mungkin ini adalah ruang antar jari
                 if angle <= math.pi/2:
                     finger_count += 1
     
-    # 4. Add finger count to features
+    # 4. Tambahkan jumlah jari ke fitur
     features.append(finger_count)
     
-    # 5. Add defect distances (up to 5)
-    defect_distances.sort(reverse=True)
+    # 5. Tambahkan jarak defect (hingga 5)
+    defect_distances.sort(reverse=True)  # Urutkan jarak dari yang terbesar
     for i in range(min(5, len(defect_distances))):
         features.append(defect_distances[i])
     
-    # Pad if less than 5 defects
-    while len(features) < 8:  # 3 base features + 5 defect distances
+    # Padding jika defect kurang dari 5
+    while len(features) < 8:  # 3 fitur dasar + 5 jarak defect
         features.append(0)
     
-    # 6. Add aspect ratio of bounding rect
-    x, y, w, h = cv2.boundingRect(contour)
-    aspect_ratio = float(w) / h if h > 0 else 0
+    # 6. Tambahkan rasio aspek bounding rect
+    x, y, w, h = cv2.boundingRect(contour)  # Dapatkan persegi pembatas
+    aspect_ratio = float(w) / h if h > 0 else 0  # Hitung rasio aspek
     features.append(aspect_ratio)
     
-    # 7. Add hand orientation (angle of the ellipse)
+    # 7. Tambahkan orientasi tangan (sudut dari elips)
     if len(contour) >= 5:
-        (x, y), (MA, ma), angle = cv2.fitEllipse(contour)
-        features.append(angle / 180.0)  # Normalize to 0-1
+        (x, y), (MA, ma), angle = cv2.fitEllipse(contour)  # Dapatkan elips yang cocok
+        features.append(angle / 180.0)  # Normalisasi ke 0-1
     else:
         features.append(0)
     
     return features
 
-# ============= CUSTOM CLASSIFIER IMPLEMENTATION =============
-class SimpleClassifier:
-    """A simplified classifier to replace SVM"""
-    def __init__(self):
-        self.exemplars = {}  # Class -> list of feature vectors
-        self.trained = False
+# ============= IMPLEMENTASI SVM KUSTOM DARI AWAL =============
+class CustomSVM:
+    """Implementasi SVM kustom tanpa menggunakan library machine learning"""
+    def __init__(self, C=1.0, max_iter=1000, tol=1e-3):
+        self.C = C  # Parameter regularisasi
+        self.max_iter = max_iter  # Iterasi maksimum
+        self.tol = tol  # Toleransi konvergensi
+        self.models = {}  # Menyimpan model SVM biner untuk one-vs-rest
+        self.trained = False  # Status pelatihan
+        self.classes = None  # Kelas yang tersedia
+        
+    def _linear_kernel(self, x1, x2):
+        """Fungsi kernel linear sederhana"""
+        return np.dot(x1, x2)  # Hasil dot product
+    
+    def _rbf_kernel(self, x1, x2, gamma=0.1):
+        """Fungsi kernel RBF (Gaussian)"""
+        return np.exp(-gamma * np.sum((x1 - x2) ** 2))  # Fungsi eksponensial kernel Gaussian
+        
+    def _train_binary_svm(self, X, y, positive_class):
+        """Melatih pengklasifikasi SVM biner menggunakan algoritma SMO yang disederhanakan"""
+        n_samples, n_features = X.shape  # Jumlah sampel dan fitur
+        
+        # Konversi label ke biner {-1, 1}
+        binary_y = np.where(y == positive_class, 1, -1)  # 1 untuk kelas positif, -1 untuk lainnya
+        
+        # Inisialisasi parameter
+        alphas = np.zeros(n_samples)  # Koefisien alpha
+        b = 0  # Bias
+        
+        # Hitung matriks kernel (gunakan kernel linear untuk kesederhanaan)
+        K = np.zeros((n_samples, n_samples))  # Matriks kernel
+        for i in range(n_samples):
+            for j in range(n_samples):
+                K[i, j] = self._linear_kernel(X[i], X[j])  # Hitung kernel untuk setiap pasangan sampel
+        
+        # Algoritma SMO yang disederhanakan
+        iter_count = 0
+        while iter_count < self.max_iter:
+            alpha_changed = 0  # Penghitung alpha yang diubah
+            
+            for i in range(n_samples):
+                # Hitung error
+                f_i = np.sum(alphas * binary_y * K[i]) + b  # Prediksi saat ini
+                E_i = f_i - binary_y[i]  # Error
+                
+                # Periksa kondisi KKT
+                if (binary_y[i] * E_i < -self.tol and alphas[i] < self.C) or \
+                   (binary_y[i] * E_i > self.tol and alphas[i] > 0):
+                    
+                    # Pilih j acak != i
+                    j = i
+                    while j == i:
+                        j = np.random.randint(0, n_samples)
+                    
+                    # Hitung error untuk j
+                    f_j = np.sum(alphas * binary_y * K[j]) + b  # Prediksi untuk j
+                    E_j = f_j - binary_y[j]  # Error untuk j
+                    
+                    # Simpan nilai alpha lama
+                    alpha_i_old = alphas[i]
+                    alpha_j_old = alphas[j]
+                    
+                    # Hitung batas L dan H
+                    if binary_y[i] != binary_y[j]:
+                        L = max(0, alphas[j] - alphas[i])  # Batas bawah
+                        H = min(self.C, self.C + alphas[j] - alphas[i])  # Batas atas
+                    else:
+                        L = max(0, alphas[i] + alphas[j] - self.C)  # Batas bawah
+                        H = min(self.C, alphas[i] + alphas[j])  # Batas atas
+                    
+                    if L == H:
+                        continue
+                    
+                    # Hitung eta
+                    eta = 2 * K[i, j] - K[i, i] - K[j, j]  # Turunan kedua
+                    if eta >= 0:
+                        continue
+                    
+                    # Perbarui alpha_j
+                    alphas[j] = alpha_j_old - binary_y[j] * (E_i - E_j) / eta  # Update alpha j
+                    
+                    # Clip alpha_j
+                    alphas[j] = max(L, min(H, alphas[j]))  # Batasi dalam rentang [L,H]
+                    
+                    if abs(alphas[j] - alpha_j_old) < 1e-5:
+                        continue
+                    
+                    # Perbarui alpha_i
+                    alphas[i] = alpha_i_old + binary_y[i] * binary_y[j] * (alpha_j_old - alphas[j])  # Update alpha i
+                    
+                    # Perbarui threshold b
+                    b1 = b - E_i - binary_y[i] * (alphas[i] - alpha_i_old) * K[i, i] - \
+                         binary_y[j] * (alphas[j] - alpha_j_old) * K[i, j]  # b1 untuk i
+                    
+                    b2 = b - E_j - binary_y[i] * (alphas[i] - alpha_i_old) * K[i, j] - \
+                         binary_y[j] * (alphas[j] - alpha_j_old) * K[j, j]  # b2 untuk j
+                    
+                    if 0 < alphas[i] < self.C:
+                        b = b1  # Gunakan b1 jika i adalah support vector
+                    elif 0 < alphas[j] < self.C:
+                        b = b2  # Gunakan b2 jika j adalah support vector
+                    else:
+                        b = (b1 + b2) / 2  # Gunakan rata-rata
+                    
+                    alpha_changed += 1
+            
+            if alpha_changed == 0:
+                iter_count += 1  # Tingkatkan penghitung iterasi jika tidak ada perubahan
+            else:
+                iter_count = 0  # Reset penghitung jika ada perubahan
+        
+        # Temukan support vectors
+        sv_indices = alphas > 1e-5  # Indeks support vector
+        support_vectors = X[sv_indices]  # Support vector
+        support_alphas = alphas[sv_indices]  # Alpha untuk support vector
+        support_labels = binary_y[sv_indices]  # Label untuk support vector
+        
+        # Hitung bobot untuk SVM linear
+        w = np.sum((support_alphas * support_labels).reshape(-1, 1) * support_vectors, axis=0)  # Bobot
+        
+        return {
+            'w': w,  # Bobot
+            'b': b,  # Bias
+            'support_vectors': support_vectors,  # Support vector
+            'support_alphas': support_alphas,  # Alpha
+            'support_labels': support_labels  # Label
+        }
     
     def fit(self, X, y):
-        """Train the classifier by storing exemplars for each class"""
-        # Reset exemplars
-        self.exemplars = {}
+        """Melatih SVM multi-kelas menggunakan pendekatan one-vs-rest"""
+        X = np.array(X)  # Konversi ke array numpy
+        y = np.array(y)  # Konversi ke array numpy
         
-        # Store feature vectors by class
-        for features, label in zip(X, y):
-            if label not in self.exemplars:
-                self.exemplars[label] = []
-            self.exemplars[label].append(features)
+        # Dapatkan kelas unik
+        self.classes = np.unique(y)  # Daftar kelas unik
         
-        self.trained = True
+        if len(self.classes) < 2:
+            raise ValueError("Butuh setidaknya 2 kelas untuk klasifikasi")  # Error jika kurang dari 2 kelas
+        
+        # Latih SVM biner untuk setiap kelas (one-vs-rest)
+        for cls in self.classes:
+            print(f"Melatih SVM untuk kelas {cls}...")
+            self.models[cls] = self._train_binary_svm(X, y, cls)  # Latih untuk setiap kelas
+        
+        self.trained = True  # Set status pelatihan menjadi selesai
         return self
     
-    def predict(self, X):
-        """Predict class using nearest neighbor approach"""
-        if not self.trained:
-            return [0] * len(X)
-        
-        predictions = []
-        for features in X:
-            predictions.append(self._predict_single(features))
-        return np.array(predictions)
+    def _predict_binary(self, x, model):
+        """Membuat prediksi biner menggunakan model terlatih"""
+        return np.dot(x, model['w']) + model['b']  # Fungsi keputusan SVM
     
-    def _predict_single(self, features):
-        """Predict class for a single feature vector"""
-        if not self.trained or not self.exemplars:
-            return 0
+    def predict(self, X):
+        """Memprediksi label kelas untuk sampel dalam X"""
+        if not self.trained:
+            return np.zeros(len(X))  # Kembalikan nol jika belum dilatih
         
-        best_dist = float('inf')
-        best_class = 0
+        X = np.array(X)  # Konversi ke array numpy
+        n_samples = X.shape[0]  # Jumlah sampel
+        predictions = np.zeros(n_samples)  # Inisialisasi prediksi
         
-        # Check each class
-        for class_label, examples in self.exemplars.items():
-            for example in examples:
-                # Calculate Euclidean distance
-                dist = np.sqrt(np.sum((np.array(features) - np.array(example))**2))
-                
-                if dist < best_dist:
-                    best_dist = dist
-                    best_class = class_label
+        for i in range(n_samples):
+            scores = {}  # Skor untuk setiap kelas
+            for cls, model in self.models.items():
+                # Hitung skor keputusan
+                scores[cls] = self._predict_binary(X[i], model)  # Skor untuk setiap kelas
+            
+            # Pilih kelas dengan skor tertinggi
+            predictions[i] = max(scores.items(), key=lambda x: x[1])[0]  # Kelas dengan skor tertinggi
         
-        return best_class
+        return predictions
+    
+    def _sigmoid(self, x, a=1, b=0):
+        """Fungsi sigmoid untuk mengubah output SVM menjadi probabilitas"""
+        return 1 / (1 + np.exp(a * x + b))  # Fungsi sigmoid
     
     def predict_proba(self, X):
-        """Return confidence scores for each class"""
+        """Mengembalikan estimasi probabilitas untuk sampel dalam X"""
         if not self.trained:
-            return [[1.0 if i == 0 else 0.0 for i in range(7)]] * len(X)
+            return np.zeros((len(X), len(gesture_classes)))  # Kembalikan nol jika belum dilatih
         
-        probas = []
-        for features in X:
-            probas.append(self._predict_proba_single(features))
-        return np.array(probas)
-    
-    def _predict_proba_single(self, features):
-        """Calculate confidence for each class for a single feature vector"""
-        if not self.trained or not self.exemplars:
-            return [1.0 if i == 0 else 0.0 for i in range(7)]
+        X = np.array(X)  # Konversi ke array numpy
+        n_samples = X.shape[0]  # Jumlah sampel
+        n_classes = len(gesture_classes)  # Jumlah kelas
+        probas = np.zeros((n_samples, n_classes))  # Inisialisasi probabilitas
         
-        # Calculate distance to each example
-        class_distances = {}
-        for class_label, examples in self.exemplars.items():
-            distances = []
-            for example in examples:
-                dist = np.sqrt(np.sum((np.array(features) - np.array(example))**2))
-                distances.append(dist)
+        for i in range(n_samples):
+            # Dapatkan skor mentah untuk setiap kelas
+            raw_scores = np.zeros(n_classes)  # Skor untuk setiap kelas
+            for cls, model in self.models.items():
+                if cls < n_classes:  # Pastikan indeks kelas dalam batas
+                    raw_scores[cls] = self._predict_binary(X[i], model)  # Skor untuk kelas ini
             
-            # Use the minimum distance for this class
-            if distances:
-                class_distances[class_label] = min(distances)
-        
-        # Convert distances to probabilities (closer = higher probability)
-        total_classes = len(gesture_classes)
-        probas = [0.0] * total_classes
-        
-        if class_distances:
-            # Normalize distances using softmax-like approach
-            distances = np.array(list(class_distances.values()))
-            distances = np.exp(-distances)  # Convert to similarity (higher is better)
-            total = np.sum(distances)
-            
-            if total > 0:
-                # Set probability for each class
-                for i, (class_label, dist) in enumerate(class_distances.items()):
-                    similarity = np.exp(-dist)
-                    probas[class_label] = similarity / total
-        else:
-            probas[0] = 1.0  # Default to "No gesture" if no distances
+            # Terapkan softmax untuk mendapatkan probabilitas
+            exp_scores = np.exp(raw_scores - np.max(raw_scores))  # Kurangi max untuk stabilitas numerik
+            probas[i] = exp_scores / np.sum(exp_scores)  # Normalisasi menjadi probabilitas
         
         return probas
 
-# Initialize classifier
-classifier = SimpleClassifier()
+# Inisialisasi classifier
+classifier = CustomSVM(C=1.0, max_iter=100)  # Menggunakan iterasi lebih sedikit untuk mempercepat pelatihan
 
-# Function to save a screenshot with gesture information
+# Fungsi untuk menyimpan screenshot dengan informasi gerakan
 def save_screenshot(frame, class_id, sample_number):
-    # Create class-specific directory if it doesn't exist
+    # Buat direktori khusus kelas jika belum ada
     class_dir = os.path.join(screenshots_dir, f"class_{class_id}_{gesture_classes[class_id]}")
     if not os.path.exists(class_dir):
         os.makedirs(class_dir)
     
-    # Generate a filename with timestamp
+    # Buat nama file dengan timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = os.path.join(class_dir, f"sample_{sample_number}_{timestamp}.jpg")
     
-    # Add class label to the frame
+    # Tambahkan label kelas ke frame
     labeled_frame = frame.copy()
     cv2.putText(labeled_frame, f"Class: {class_id} - {gesture_classes[class_id]}", 
                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
     
-    # Save the screenshot
+    # Simpan screenshot
     cv2.imwrite(filename, labeled_frame)
     print(f"Saved screenshot: {filename}")
 
-# Functions to save and load training data
+# Fungsi untuk menyimpan data pelatihan ke file CSV
+def save_training_data_to_csv():
+    global training_data, training_labels
+    
+    if len(training_data) == 0 or len(training_labels) == 0:
+        print("Tidak ada data pelatihan yang tersedia untuk disimpan ke CSV.")
+        return False
+    
+    try:
+        # Buat header untuk file CSV
+        header = []
+        
+        # Nama-nama untuk fitur
+        feature_names = [
+            'normalized_area',          # Area yang dinormalisasi
+            'convexity',                # Rasio convexity
+            'finger_count'              # Jumlah jari terdeteksi
+        ]
+        
+        # Tambahkan nama untuk jarak defect (hingga 5)
+        for i in range(5):
+            feature_names.append(f'defect_distance_{i}')
+        
+        # Tambahkan nama fitur tambahan
+        feature_names.extend(['aspect_ratio', 'orientation'])
+        
+        # Tambahkan nama fitur ke header
+        header.extend(feature_names)
+        
+        # Tambahkan label kelas ke header
+        header.append('gesture_class')
+        
+        # Buat data baris untuk setiap sampel
+        rows = []
+        for i in range(len(training_data)):
+            features = training_data[i]
+            label = training_labels[i]
+            
+            # Gabungkan fitur dan label dalam satu baris
+            row = list(features) + [label]
+            rows.append(row)
+        
+        # Tulis ke file CSV
+        with open(csv_data_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(header)
+            writer.writerows(rows)
+        
+        print(f"Data pelatihan disimpan ke CSV: {csv_data_path} ({len(rows)} sampel)")
+        return True
+    except Exception as e:
+        print(f"Error menyimpan data ke CSV: {e}")
+        return False
+
+# Fungsi untuk memuat data pelatihan dari file CSV
+def load_training_data_from_csv():
+    global training_data, training_labels
+    
+    if not os.path.exists(csv_data_path):
+        print("File CSV data pelatihan tidak ditemukan.")
+        return False
+    
+    try:
+        training_data = []
+        training_labels = []
+        
+        # Baca dari file CSV
+        with open(csv_data_path, 'r', newline='') as f:
+            reader = csv.reader(f)
+            header = next(reader)  # Lewati baris header
+            
+            for row in reader:
+                if len(row) >= 10:  # Minimal 9 fitur + 1 label
+                    try:
+                        # Ambil fitur (semua kolom kecuali yang terakhir)
+                        features = [float(val) for val in row[:-1]]
+                        
+                        # Ambil label (kolom terakhir)
+                        label = int(row[-1])
+                        
+                        # Tambahkan ke data pelatihan
+                        training_data.append(features)
+                        training_labels.append(label)
+                    except ValueError:
+                        print(f"Warning: Melewati baris CSV yang tidak valid")
+        
+        print(f"Dimuat {len(training_data)} sampel dari CSV: {csv_data_path}")
+        return len(training_data) > 0
+    except Exception as e:
+        print(f"Error memuat data dari CSV: {e}")
+        return False
+
+# Ubah fungsi save_training_data untuk juga menyimpan ke CSV
 def save_training_data():
     global training_data, training_labels
     
     if len(training_data) == 0 or len(training_labels) == 0:
-        print("No training data available to save.")
+        print("Tidak ada data pelatihan yang tersedia untuk disimpan.")
         return False
     
     try:
-        # Save data using pickle
+        # Simpan data menggunakan pickle
         with open(training_data_path, 'wb') as f:
             pickle.dump((training_data, training_labels), f)
         
-        print(f"Training data saved to {training_data_path} ({len(training_data)} samples)")
+        print(f"Data pelatihan disimpan ke {training_data_path} ({len(training_data)} sampel)")
+        
+        # Juga simpan ke CSV
+        save_training_data_to_csv()
+        
         return True
     except Exception as e:
-        print(f"Error saving training data: {e}")
+        print(f"Error menyimpan data pelatihan: {e}")
         return False
 
+# Ubah fungsi load_training_data untuk coba memuat dari CSV jika pickle gagal
 def load_training_data():
     global training_data, training_labels
     
-    if not os.path.exists(training_data_path):
-        print("No training data file found.")
-        return False
-    
-    try:
-        # Load data using pickle
-        with open(training_data_path, 'rb') as f:
-            training_data, training_labels = pickle.load(f)
-        
-        print(f"Loaded {len(training_data)} samples from {training_data_path}")
-        return len(training_data) > 0
-    except Exception as e:
-        print(f"Error loading training data: {e}")
-        return False
+    # Coba muat dari file pickle terlebih dahulu
+    if os.path.exists(training_data_path):
+        try:
+            # Muat data menggunakan pickle
+            with open(training_data_path, 'rb') as f:
+                training_data, training_labels = pickle.load(f)
+            
+            print(f"Dimuat {len(training_data)} sampel dari {training_data_path}")
+            
+            # Pastikan data CSV juga up-to-date
+            save_training_data_to_csv()
+            
+            return len(training_data) > 0
+        except Exception as e:
+            print(f"Error memuat data dari pickle: {e}")
+            # Jika gagal, coba muat dari CSV
+            return load_training_data_from_csv()
+    else:
+        # Jika file pickle tidak ada, coba muat dari CSV
+        return load_training_data_from_csv()
 
-# Function to train the model
+# Modifikasi fungsi train_model untuk menyimpan CSV setelah pelatihan
 def train_model():
     global classifier, training_data, training_labels
     
     if len(training_data) == 0 or len(training_labels) == 0:
-        print("No training data available.")
+        print("Tidak ada data pelatihan tersedia.")
         return False
     
     try:
-        # Check if we have enough samples of each class
+        # Periksa apakah kita memiliki cukup sampel dari setiap kelas
         class_counts = {}
         for label in training_labels:
             class_counts[label] = class_counts.get(label, 0) + 1
         
-        # Print class distribution
-        print("Class distribution in training data:")
+        # Cetak distribusi kelas
+        print("Distribusi kelas dalam data pelatihan:")
         for cls, count in class_counts.items():
-            print(f"  Class {cls} ({gesture_classes.get(cls, 'Unknown')}): {count} samples")
+            print(f"  Kelas {cls} ({gesture_classes.get(cls, 'Unknown')}): {count} sampel")
         
-        # Make sure we have at least 2 classes
+        # Pastikan kita memiliki setidaknya 2 kelas
         if len(class_counts) < 2:
-            print("Error: Need at least 2 different classes to train the model.")
+            print("Error: Butuh setidaknya 2 kelas berbeda untuk melatih model.")
             return False
         
-        # Convert to numpy arrays
+        # Konversi ke array numpy
         X = np.array(training_data)
         y = np.array(training_labels)
         
-        print(f"Training custom classifier with {len(training_data)} samples...")
-        # Train the model
+        print(f"Melatih classifier SVM kustom dengan {len(training_data)} sampel...")
+        # Reset classifier dan latih
+        classifier = CustomSVM(C=1.0, max_iter=100)
         classifier.fit(X, y)
         
-        # Save the model to pickle file
+        # Simpan model ke file pickle
         with open(model_path, 'wb') as f:
             pickle.dump(classifier, f)
         
-        # Save training data
+        # Simpan data pelatihan ke pickle dan CSV
         save_training_data()
         
-        print(f"Custom classifier trained and saved to {model_path}")
+        print(f"Classifier SVM kustom dilatih dan disimpan ke {model_path}")
         return True
     except Exception as e:
-        print(f"Error training model: {str(e)}")
+        print(f"Error melatih model: {str(e)}")
         return False
 
-# Function to load the model if it exists
+# Fungsi untuk memuat model jika ada
 def load_model():
     global classifier, training_data, training_labels
     
-    # Try to load training data first
+    # Coba muat data pelatihan terlebih dahulu
     loaded_data = load_training_data()
     
-    # Then try to load the model
+    # Kemudian coba muat model
     if os.path.exists(model_path):
         try:
             with open(model_path, 'rb') as f:
                 classifier = pickle.load(f)
-            print(f"Custom classifier model loaded from {model_path}")
+            print(f"Model SVM kustom dimuat dari {model_path}")
             return True
         except Exception as e:
-            print(f"Error loading model: {e}")
+            print(f"Error memuat model: {e}")
             
-            # If we have training data, attempt to retrain
+            # Jika kita memiliki data pelatihan, coba melatih ulang
             if loaded_data and len(training_data) > 0:
-                print("Attempting to retrain model with loaded data...")
+                print("Mencoba melatih ulang model dengan data yang dimuat...")
                 return train_model()
             return False
     else:
-        print("No pre-trained model found.")
+        print("Tidak ditemukan model SVM yang sudah dilatih sebelumnya.")
         return False
 
-# Try to load the existing model and training data
+# Coba memuat model yang ada dan data pelatihan
 model_loaded = load_model()
 
-# Print instructions
-print("Custom Hand Gesture Media Controls:")
-print("- Different hand gestures will control media playback")
-print("\nTraining Mode Controls:")
-print("- Press 't' to toggle training data collection")
-print("- Press '0-6' to select the gesture class to collect")
-print("- Press 'm' to train the model")
-print("- Press 's' to save training data without retraining")
-print("- Press 'c' to clear all collected training data")
-print("- ESC key: Exit program")
+# Cetak instruksi
+print("Kontrol Media Gerakan Tangan dengan SVM Kustom:")
+print("- Gerakan tangan berbeda akan mengontrol pemutaran media")
+print("\nKontrol Mode Pelatihan:")
+print("- Tekan 't' untuk toggle pengumpulan data pelatihan")
+print("- Tekan '0-6' untuk memilih kelas gerakan yang akan dikumpulkan")
+print("- Tekan 'm' untuk melatih model")
+print("- Tekan 's' untuk menyimpan data pelatihan tanpa melatih ulang")
+print("- Tekan 'c' untuk menghapus semua data pelatihan yang dikumpulkan")
+print("- Tombol ESC: Keluar program")
 
+# Loop program utama
 try:
     while running and cap.isOpened():
-        ret, frame = cap.read()
+        ret, frame = cap.read()  # Baca frame dari kamera
         if not ret:
-            print("Failed to get frame from camera")
+            print("Gagal mendapatkan frame dari kamera")
             break
         
-        # Mirror the frame horizontally for more intuitive interaction
-        frame = cv2.flip(frame, 1)
+        # Cerminkan frame secara horizontal untuk interaksi yang lebih intuitif
+        frame = cv2.flip(frame, 1)  # Flip horizontal agar lebih alami
         
-        # Get frame dimensions
-        h, w, c = frame.shape
+        # Dapatkan dimensi frame
+        h, w, c = frame.shape  # Tinggi, lebar, dan kanal warna
         
-        # Status text to display
-        status_text = "No gesture detected"
-        prediction = 0
+        # Teks status untuk ditampilkan
+        status_text = "No gesture detected"  # Status default
+        prediction = 0  # Prediksi awal
         
-        # Display the training status
+        # Tampilkan status pelatihan
         if collecting_data:
-            cv2.putText(frame, f"Collecting class: {current_collection_class} - {gesture_classes[current_collection_class]}", 
+            cv2.putText(frame, f"Mengumpulkan kelas: {current_collection_class} - {gesture_classes[current_collection_class]}", 
                         (10, h - 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             
-            # Count samples for current class
+            # Hitung sampel untuk kelas saat ini
             current_class_count = sum(1 for label in training_labels if label == current_collection_class)
-            cv2.putText(frame, f"Class samples: {current_class_count}", 
+            cv2.putText(frame, f"Sampel kelas: {current_class_count}", 
                         (10, h - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         
-        # Show total samples collected
-        cv2.putText(frame, f"Total samples: {len(training_labels)}", 
+        # Tampilkan total sampel yang dikumpulkan
+        cv2.putText(frame, f"Total sampel: {len(training_labels)}", 
                     (10, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
         
-        # Detect hand in frame
-        skin_mask = detect_skin(frame)
-        hand_contour = find_contours(skin_mask)
+        # Deteksi tangan dalam frame
+        skin_mask = detect_skin(frame)  # Deteksi kulit
+        hand_contour = find_contours(skin_mask)  # Temukan kontur tangan
         
-        # Draw the skin mask in a smaller window
-        skin_display = cv2.resize(skin_mask, (w//4, h//4))
-        frame[0:h//4, 0:w//4] = cv2.cvtColor(skin_display, cv2.COLOR_GRAY2BGR)
+        # Tampilkan skin mask di pojok kanan bawah
+        skin_display = cv2.resize(skin_mask, (w//4, h//4))  # Ubah ukuran mask
+        frame[h-h//4:h, w-w//4:w] = cv2.cvtColor(skin_display, cv2.COLOR_GRAY2BGR)  # Tempatkan di kanan bawah
         
         if hand_contour is not None:
-            # Draw the contour
-            cv2.drawContours(frame, [hand_contour], 0, (0, 255, 0), 2)
+            # Gambar kontur
+            cv2.drawContours(frame, [hand_contour], 0, (0, 255, 0), 2)  # Gambar kontur tangan
             
-            # Find convex hull and defects
+            # Temukan convex hull dan defects
             contour, hull, defects = find_convex_hull_and_defects(hand_contour)
             
             if contour is not None:
-                # Draw hull
+                # Gambar hull
                 if hull is not None:
-                    hull_points = [contour[h[0]] for h in hull]
-                    cv2.drawContours(frame, [np.array(hull_points)], 0, (0, 0, 255), 3)
+                    hull_points = [contour[h[0]] for h in hull]  # Dapatkan titik-titik hull
+                    cv2.drawContours(frame, [np.array(hull_points)], 0, (0, 0, 255), 3)  # Gambar hull
                 
-                # Draw defects
+                # Gambar defects
                 if defects is not None:
                     for i in range(defects.shape[0]):
-                        s, e, f, d = defects[i, 0]
-                        start = tuple(contour[s][0])
-                        end = tuple(contour[e][0])
-                        far = tuple(contour[f][0])
+                        s, e, f, d = defects[i, 0]  # Start, end, far point, dan distance
+                        start = tuple(contour[s][0])  # Titik awal
+                        end = tuple(contour[e][0])  # Titik akhir
+                        far = tuple(contour[f][0])  # Titik terjauh
                         
-                        # Draw a line from start to end
-                        cv2.line(frame, start, end, [0, 255, 0], 2)
+                        # Gambar garis dari start ke end
+                        cv2.line(frame, start, end, [0, 255, 0], 2)  # Gambar garis
                         
-                        # Draw a circle at the farthest point
-                        cv2.circle(frame, far, 5, [0, 0, 255], -1)
+                        # Gambar lingkaran di titik terjauh
+                        cv2.circle(frame, far, 5, [0, 0, 255], -1)  # Gambar lingkaran
                 
-                # Extract features from hand
-                features = extract_features(contour, defects, frame.shape)
+                # Ekstrak fitur dari tangan
+                features = extract_features(contour, defects, frame.shape)  # Ekstrak fitur
                 
                 if features:
-                    # If collecting data, add to training set
+                    # Jika mengumpulkan data, tambahkan ke set pelatihan
                     if collecting_data:
-                        # Add sample to training data
-                        training_data.append(features)
-                        training_labels.append(current_collection_class)
+                        # Tambah sampel ke data pelatihan
+                        training_data.append(features)  # Tambahkan fitur
+                        training_labels.append(current_collection_class)  # Tambahkan label
                         
-                        # Calculate current class count
+                        # Hitung jumlah kelas saat ini
                         current_class_count = sum(1 for label in training_labels if label == current_collection_class)
                         
-                        # Take a screenshot if cooldown has passed
+                        # Ambil screenshot jika cooldown telah berlalu
                         if sample_cooldown <= 0:
-                            save_screenshot(frame, current_collection_class, current_class_count)
-                            sample_cooldown = 10  # Set cooldown for 10 frames
+                            save_screenshot(frame, current_collection_class, current_class_count)  # Simpan screenshot
+                            sample_cooldown = 10  # Set cooldown untuk 10 frame
                         else:
-                            sample_cooldown -= 1
+                            sample_cooldown -= 1  # Kurangi cooldown
                         
-                        # Limit collection rate
-                        time.sleep(0.1)
+                        # Batasi laju pengumpulan
+                        time.sleep(0.1)  # Jeda 0.1 detik
                     
-                    # If model is loaded, predict the gesture
-                    if model_loaded:
+                    # Jika model dimuat, prediksi gerakan
+                    if model_loaded and classifier.trained:
                         try:
-                            # Reshape features for prediction
-                            features_array = np.array([features])
+                            # Reshape fitur untuk prediksi
+                            features_array = np.array([features])  # Konversi ke array numpy
                             
-                            # Predict the gesture
-                            prediction = classifier.predict(features_array)[0]
+                            # Prediksi gerakan
+                            prediction = classifier.predict(features_array)[0]  # Prediksi kelas
                             
-                            # Get the probabilities for each class
-                            probabilities = classifier.predict_proba(features_array)[0]
+                            # Dapatkan probabilitas untuk setiap kelas
+                            probabilities = classifier.predict_proba(features_array)[0]  # Probabilitas
                             
-                            # Only accept predictions with confidence above 0.4 (40%)
-                            max_prob = np.max(probabilities)
+                            # Hanya terima prediksi dengan keyakinan di atas 0.4 (40%)
+                            max_prob = np.max(probabilities)  # Probabilitas maksimum
                             if max_prob > 0.4:
-                                # Get the class with the highest probability
-                                prediction = np.argmax(probabilities)
-                                # Convert the prediction to a gesture name
-                                status_text = gesture_classes.get(prediction, "Unknown gesture")
+                                # Dapatkan kelas dengan probabilitas tertinggi
+                                prediction = np.argmax(probabilities)  # Kelas terprediksi
+                                # Konversi prediksi ke nama gerakan
+                                status_text = gesture_classes.get(prediction, "Unknown gesture")  # Teks status
                             else:
-                                # If no class has confidence above 40%, don't recognize any gesture
-                                prediction = 0
-                                status_text = "No gesture detected (low confidence)"
+                                # Jika tidak ada kelas dengan keyakinan di atas 40%, jangan kenali gerakan
+                                prediction = 0  # Reset prediksi
+                                status_text = "No gesture detected (low confidence)"  # Teks status
                             
-                            # Display the prediction probabilities
+                            # Tampilkan probabilitas prediksi
                             for i, prob in enumerate(probabilities):
-                                if prob > 0.05:  # Only display significant probabilities
-                                    prob_text = f"{gesture_classes.get(i, 'Unknown')}: {prob:.2f}"
-                                    # Highlight the selected prediction with a different color
-                                    text_color = (0, 0, 255) if prob > 0.4 else (255, 0, 0)
+                                if i < len(gesture_classes) and prob > 0.05:  # Hanya tampilkan probabilitas signifikan
+                                    prob_text = f"{gesture_classes.get(i, 'Unknown')}: {prob:.2f}"  # Teks probabilitas
+                                    # Sorot prediksi terpilih dengan warna berbeda
+                                    text_color = (0, 0, 255) if prob > 0.4 else (255, 0, 0)  # Warna teks
                                     cv2.putText(frame, prob_text, 
                                                 (w - 300, 30 + i*30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 1)
                             
-                            # Execute actions based on the predicted gesture only if confidence is high enough
+                            # Jalankan aksi berdasarkan gerakan yang diprediksi
                             if max_prob > 0.4:
-                                current_time = time.time()
+                                current_time = time.time()  # Waktu saat ini
                                 
-                                # Volume control variables
-                                volume_adjustment_interval = 0.3
+                                # Variabel kontrol volume
+                                volume_adjustment_interval = 0.3  # Interval penyesuaian volume
                                 
-                                if prediction == 1 and previous_gesture != status_text:  # Play/Pause
+                                if prediction == 1 :  # Play/Pause
                                     if current_time - last_action_time > cooldown_time:
-                                        pyautogui.press('playpause')
-                                        last_action_time = current_time
-                                        print(f"Action: Play/Pause (confidence: {max_prob:.2f})")
-                                elif prediction == 2 and previous_gesture != status_text:  # Stop
+                                        pyautogui.press('playpause')  # Tekan tombol play/pause
+                                        last_action_time = current_time  # Update waktu aksi
+                                        print(f"Aksi: Play/Pause (keyakinan: {max_prob:.2f})")
+                                elif prediction == 2 :  # Stop
                                     if current_time - last_action_time > cooldown_time:
-                                        pyautogui.press('stop')
-                                        last_action_time = current_time
-                                        print(f"Action: Stop (confidence: {max_prob:.2f})")
-                                elif prediction == 3 and previous_gesture != status_text:  # Next Track
+                                        pyautogui.press('stop')  # Tekan tombol stop
+                                        last_action_time = current_time  # Update waktu aksi
+                                        print(f"Aksi: Stop (keyakinan: {max_prob:.2f})")
+                                elif prediction == 3 :  # Next Track
                                     if current_time - last_action_time > cooldown_time:
-                                        pyautogui.press('nexttrack')
-                                        last_action_time = current_time
-                                        print(f"Action: Next Track (confidence: {max_prob:.2f})")
-                                elif prediction == 4 and previous_gesture != status_text:  # Previous Track
+                                        pyautogui.press('nexttrack')  # Tekan tombol lagu berikutnya
+                                        last_action_time = current_time  # Update waktu aksi
+                                        print(f"Aksi: Next Track (keyakinan: {max_prob:.2f})")
+                                elif prediction == 4 :  # Previous Track
                                     if current_time - last_action_time > cooldown_time:
-                                        pyautogui.press('prevtrack')
-                                        last_action_time = current_time
-                                        print(f"Action: Previous Track (confidence: {max_prob:.2f})")
+                                        pyautogui.press('prevtrack')  # Tekan tombol lagu sebelumnya
+                                        last_action_time = current_time  # Update waktu aksi
+                                        print(f"Aksi: Previous Track (keyakinan: {max_prob:.2f})")
                                 elif prediction == 5:  # Volume Up
                                     if current_time - last_action_time > volume_adjustment_interval:
-                                        pyautogui.press('volumeup')
-                                        last_action_time = current_time
-                                        print(f"Action: Volume Up (confidence: {max_prob:.2f})")
+                                        pyautogui.press('volumeup')  # Tekan tombol volume up
+                                        last_action_time = current_time  # Update waktu aksi
+                                        print(f"Aksi: Volume Up (keyakinan: {max_prob:.2f})")
                                 elif prediction == 6:  # Volume Down
                                     if current_time - last_action_time > volume_adjustment_interval:
-                                        pyautogui.press('volumedown')
-                                        last_action_time = current_time
-                                        print(f"Action: Volume Down (confidence: {max_prob:.2f})")
+                                        pyautogui.press('volumedown')  # Tekan tombol volume down
+                                        last_action_time = current_time  # Update waktu aksi
+                                        print(f"Aksi: Volume Down (keyakinan: {max_prob:.2f})")
                                 
-                                # Update previous gesture only for high-confidence predictions
-                                previous_gesture = status_text
+                                # Update gerakan sebelumnya hanya untuk prediksi kepercayaan tinggi
+                                previous_gesture = status_text  # Simpan gerakan saat ini
                         except Exception as e:
-                            print(f"Error during prediction: {e}")
+                            print(f"Error selama prediksi: {e}")
                     
-                    # Display extracted features
+                    # Tampilkan fitur yang diekstrak
                     for i in range(min(6, len(features))):
                         cv2.putText(frame, f"F{i}: {features[i]:.3f}", 
                                     (10, 60 + i*30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-        # Display status text
-        cv2.putText(frame, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        # Tampilkan teks status
+        cv2.putText(frame, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)  # Teks status utama
+        cv2.putText(frame, "Klasifikasi SVM", (w - 200, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)  # Label SVM
         
-        # Display frame
-        cv2.imshow("Custom Hand Gesture Media Control", frame)
+        # Tampilkan judul untuk skin mask
+        cv2.putText(frame, "Mask Kulit", (w - w//4, h - h//4 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
         
-        # Check for key press
-        key = cv2.waitKey(1) & 0xFF
+        # Tampilkan frame
+        cv2.imshow("Kontrol Media Gerakan Tangan dengan SVM Kustom", frame)  # Tampilkan frame
         
-        # ESC key to exit
+        # Periksa penekanan tombol
+        key = cv2.waitKey(1) & 0xFF  # Tunggu tombol
+        
+        # Tombol ESC untuk keluar
         if key == 27:
-            running = False
+            running = False  # Hentikan program
         
-        # 't' key to toggle training data collection
+        # Tombol 't' untuk toggle pengumpulan data pelatihan
         elif key == ord('t'):
-            collecting_data = not collecting_data
-            print(f"Data collection {'started' if collecting_data else 'stopped'}")
-            # Reset sample cooldown when toggling
+            collecting_data = not collecting_data  # Toggle status pengumpulan
+            print(f"Pengumpulan data {'dimulai' if collecting_data else 'dihentikan'}")
+            # Reset sample cooldown saat toggling
             sample_cooldown = 0
         
-        # 'm' key to train the model
+        # Tombol 'm' untuk melatih model
         elif key == ord('m'):
-            print("Training model...")
-            model_loaded = train_model()
+            print("Melatih model SVM...")
+            model_loaded = train_model()  # Latih model
         
-        # 's' key to save data without retraining
+        # Tombol 's' untuk menyimpan data tanpa melatih ulang
         elif key == ord('s'):
-            print("Saving training data...")
-            save_training_data()
+            print("Menyimpan data pelatihan...")
+            save_training_data()  # Simpan data
+            save_training_data_to_csv()  # Simpan ke CSV
+            print("Data pelatihan disimpan")
         
-        # 'c' key to clear all collected training data
+        # Tombol 'c' untuk menghapus semua data pelatihan yang dikumpulkan
         elif key == ord('c'):
-            print("Clearing all training data...")
-            training_data = []
-            training_labels = []
-            print("Training data cleared")
+            print("Menghapus semua data pelatihan...")
+            training_data = []  # Kosongkan data
+            training_labels = []  # Kosongkan label
+            print("Data pelatihan dihapus")
         
-        # Number keys to select the gesture class for training
+        # Tombol angka untuk memilih kelas gerakan untuk pelatihan
         elif key >= ord('0') and key <= ord('6'):
-            current_collection_class = key - ord('0')
-            print(f"Selected class: {current_collection_class} - {gesture_classes[current_collection_class]}")
+            current_collection_class = key - ord('0')  # Tentukan kelas
+            print(f"Kelas yang dipilih: {current_collection_class} - {gesture_classes[current_collection_class]}")
         
-        # 'q' key as an alternative exit option
+        # Tombol 'q' sebagai opsi keluar alternatif
         elif key == ord('q'):
-            running = False
+            running = False  # Hentikan program
             
 except Exception as e:
-    print(f"Unexpected error: {str(e)}")
+    print(f"Error tak terduga: {str(e)}")
+    import traceback
+    traceback.print_exc()  # Cetak stack trace
 
-# Before exiting, save the training data if it's not empty
+# Sebelum keluar, simpan data pelatihan jika tidak kosong
 if len(training_data) > 0:
-    print("Saving data before exit...")
-    save_training_data()
+    print("Menyimpan data sebelum keluar...")
+    save_training_data()  # Simpan data
 
-# Cleanup
-cap.release()
-cv2.destroyAllWindows()
+# Pembersihan
+cap.release()  # Lepaskan kamera
+cv2.destroyAllWindows()  # Tutup semua jendela
