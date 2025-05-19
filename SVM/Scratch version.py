@@ -1,4 +1,4 @@
-import cv2  # Library untuk pemrosesan gambar
+import cv2  # Library untuk pemrosesan gambar, pip install opencv-python
 import numpy as np  # Library untuk operasi numerik dan array
 import pyautogui  # Library untuk mengontrol keyboard dan mouse
 import time  # Library untuk fungsi waktu dan delay
@@ -32,8 +32,49 @@ gesture_classes = {
 }
 
 # Inisialisasi webcam
-cap = cv2.VideoCapture(1)  # Mulai webcam dengan indeks 1 (ganti ke 0 jika tidak berfungsi)
+cap = cv2.VideoCapture(0)  # Mulai webcam dengan indeks 1 (ganti ke 0 jika tidak berfungsi)
 running = True  # Flag untuk menjalankan program
+
+# Atur resolusi kamera (opsional, sesuaikan dengan kemampuan kamera)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+# Variabel untuk panel informasi
+info_panel_width = 400  # Lebar panel informasi di sisi kanan (pixel)
+calculation_panel_color = (30, 30, 30)  # Warna latar panel informasi (abu-abu gelap)
+
+# Warna untuk visualisasi pada frame
+colors = {
+    "contour": (0, 255, 0),            # Hijau untuk kontur tangan
+    "hull": (0, 0, 255),               # Merah untuk hull
+    "defect_point": (0, 0, 255),       # Merah untuk titik defect
+    "defect_line": (0, 255, 0),        # Hijau untuk garis defect
+    "bounding_box": (255, 255, 0),     # Kuning untuk bounding box
+    "ellipse": (0, 255, 255),          # Cyan untuk ellipse
+    "centroid": (255, 0, 255),         # Magenta untuk pusat massa
+    "finger_tip": (0, 255, 127),       # Hijau-biru untuk ujung jari
+    "text_bg": (0, 0, 0),              # Hitam untuk latar teks
+    "text": (255, 255, 255),           # Putih untuk teks
+    "convexity_good": (0, 255, 0),     # Hijau untuk convexity baik
+    "convexity_medium": (0, 255, 255), # Kuning untuk convexity sedang    "convexity_bad": (0, 100, 255),    # Oranye untuk convexity rendah
+    "metric_bg": (50, 50, 50),         # Latar untuk metrik
+    "metric_fill": (0, 180, 180),      # Warna isi bar metrik
+    "hull_area": (150, 150, 255),      # Warna area hull
+    "contour_area": (150, 255, 150),    # Warna area kontur
+    "feature_bar_bg": (40, 40, 40),    # Latar belakang bar fitur
+    "feature_importance": (0, 200, 255), # Warna bar kepentingan fitur
+    "movement_trail": (255, 100, 0),   # Warna jejak gerakan
+    "feature_highlight": (255, 255, 0) # Warna highlight fitur penting
+}
+
+# Font untuk teks pada kamera
+font = cv2.FONT_HERSHEY_SIMPLEX
+font_scale_small = 0.4
+font_scale_medium = 0.6
+font_scale_large = 0.8
+font_thickness_small = 1
+font_thickness_medium = 1
+font_thickness_large = 2
 
 # Variabel untuk pengendalian aksi
 last_action_time = 0  # Waktu terakhir aksi dilakukan
@@ -48,6 +89,115 @@ current_collection_class = 0  # Kelas gerakan yang sedang dikumpulkan
 sample_cooldown = 0  # Jeda antar pengambilan sampel
 
 # ============= DETEKSI TANGAN DAN EKSTRAKSI FITUR CUSTOM =============
+def put_text_with_background(img, text, position, font, font_scale, text_color, bg_color, thickness=1, padding=5):
+    """Menaruh teks dengan latar belakang untuk meningkatkan keterbacaan"""
+    # Dapatkan dimensi teks
+    (text_width, text_height), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+    
+    # Hitung posisi dan dimensi latar belakang
+    x, y = position
+    bg_x1 = x - padding
+    bg_y1 = y - text_height - padding
+    bg_x2 = x + text_width + padding
+    bg_y2 = y + padding
+    
+    # Gambar latar belakang
+    cv2.rectangle(img, (bg_x1, bg_y1), (bg_x2, bg_y2), bg_color, -1)
+    
+    # Gambar teks
+    cv2.putText(img, text, (x, y), font, font_scale, text_color, thickness)
+    
+    return img
+
+def draw_metric_bar(img, position, width, height, value, max_value=1.0, colors=None, label=None, font=cv2.FONT_HERSHEY_SIMPLEX):
+    """Menggambar bar metrik untuk visualisasi nilai"""
+    x, y = position
+    
+    if colors is None:
+        colors = {
+            "bg": (50, 50, 50),
+            "fill": (0, 255, 0),
+            "text": (255, 255, 255)
+        }
+    
+    # Gambar latar bar
+    cv2.rectangle(img, (x, y), (x + width, y + height), colors["bg"], -1)
+    
+    # Gambar nilai pada bar
+    fill_width = int((value / max_value) * width)
+    fill_width = max(0, min(fill_width, width))  # Pastikan dalam rentang yang valid
+    cv2.rectangle(img, (x, y), (x + fill_width, y + height), colors["fill"], -1)
+    
+    # Gambar border
+    cv2.rectangle(img, (x, y), (x + width, y + height), (200, 200, 200), 1)
+    
+    # Jika label diberikan, tampilkan
+    if label:
+        cv2.putText(img, f"{label}: {value:.2f}", (x, y - 5), font, 0.4, colors["text"], 1)
+    
+    return img
+
+def visualize_convexity(img, contour, hull_points, convexity, position):
+    """Menggambar visualisasi perbandingan convexity (area kontur vs hull)"""
+    x, y = position
+    width, height = 120, 80
+    
+    # Buat mini box untuk visualisasi
+    viz_img = np.zeros((height, width, 3), dtype=np.uint8)
+    viz_img[:, :] = (50, 50, 50)  # Latar belakang abu-abu
+    
+    # Gambar border
+    cv2.rectangle(viz_img, (0, 0), (width-1, height-1), (200, 200, 200), 1)
+    
+    # Ukur convexity untuk memilih warna
+    if convexity > 0.9:
+        fill_color = colors["convexity_good"]
+        label_color = (255, 255, 255)
+    elif convexity > 0.7:
+        fill_color = colors["convexity_medium"]
+        label_color = (0, 0, 0)
+    else:
+        fill_color = colors["convexity_bad"]
+        label_color = (255, 255, 255)
+    
+    # Skalakan dan offset kontur untuk visualisasi mini
+    scale_factor = min(width / max(max(c[0][0] for c in contour), 1),
+                      height / max(max(c[0][1] for c in contour), 1)) * 0.8
+    
+    # Temukan centroid untuk offset
+    M = cv2.moments(contour)
+    if M["m00"] != 0:
+        cx = int(M["m10"] / M["m00"])
+        cy = int(M["m01"] / M["m00"])
+    else:
+        cx, cy = 0, 0
+    
+    offset_x = width // 2 - int(cx * scale_factor)
+    offset_y = height // 2 - int(cy * scale_factor)
+    
+    # Skalakan kontur untuk visualisasi
+    mini_contour = np.array([[[int(p[0][0] * scale_factor) + offset_x, 
+                               int(p[0][1] * scale_factor) + offset_y]] for p in contour])
+    
+    # Skalakan hull untuk visualisasi
+    mini_hull = np.array([[[int(p[0] * scale_factor) + offset_x, 
+                            int(p[1] * scale_factor) + offset_y]] for p in hull_points])
+    
+    # Gambar hull pada visualisasi mini
+    cv2.drawContours(viz_img, [mini_hull], 0, colors["hull_area"], -1)
+    
+    # Gambar kontur pada visualisasi mini
+    cv2.drawContours(viz_img, [mini_contour], 0, colors["contour_area"], -1)
+    
+    # Tambahkan teks rasio
+    cv2.putText(viz_img, f"Ratio: {convexity:.2f}", (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 
+                0.4, label_color, 1)
+    
+    # Tempatkan visualisasi pada image utama
+    img[y:y+height, x:x+width] = viz_img
+    
+    return img
+
 def detect_skin(frame):
     """Mendeteksi kulit menggunakan segmentasi warna dalam ruang YCrCb"""
     # Konversi ke YCrCb
@@ -632,7 +782,7 @@ print("- Tekan 'c' untuk menghapus semua data pelatihan yang dikumpulkan")
 print("- Tombol ESC: Keluar program")
 
 # Loop program utama
-try:
+try:    
     while running and cap.isOpened():
         ret, frame = cap.read()  # Baca frame dari kamera
         if not ret:
@@ -645,9 +795,25 @@ try:
         # Dapatkan dimensi frame
         h, w, c = frame.shape  # Tinggi, lebar, dan kanal warna
         
+        # Buat panel informasi di sebelah kanan kamera
+        info_panel = np.zeros((h, info_panel_width, 3), dtype=np.uint8)
+        info_panel[:, :] = calculation_panel_color  # Warna latar belakang panel
+        
+        # Gabungkan frame kamera dengan panel informasi
+        combined_frame = np.hstack((frame, info_panel))
+        combined_w = combined_frame.shape[1]  # Lebar total frame
+        
         # Teks status untuk ditampilkan
         status_text = "No gesture detected"  # Status default
         prediction = 0  # Prediksi awal
+        
+        # Tampilkan judul panel informasi
+        cv2.putText(combined_frame, "PANEL INFORMASI & PERHITUNGAN", 
+                    (w + 10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        cv2.line(combined_frame, (w + 10, 40), (combined_w - 10, 40), (0, 255, 255), 1)
+        
+        # Variabel untuk menyimpan semua kalkulasi
+        all_calculations = {}
         
         # Tampilkan status pelatihan
         if collecting_data:
@@ -667,41 +833,458 @@ try:
         skin_mask = detect_skin(frame)  # Deteksi kulit
         hand_contour = find_contours(skin_mask)  # Temukan kontur tangan
         
-        # Tampilkan skin mask di pojok kanan bawah
+        # Status deteksi di panel informasi
+        cv2.putText(combined_frame, "Status Deteksi:", 
+                   (w + 10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        
+        hand_status = "Terdeteksi" if hand_contour is not None else "Tidak Terdeteksi"
+        cv2.putText(combined_frame, f"Tangan: {hand_status}", 
+                   (w + 20, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.6, 
+                   (0, 255, 0) if hand_contour is not None else (0, 0, 255), 1)
+        
+        # Tampilkan skin mask di pojok kanan bawah frame (bukan di panel info)
         skin_display = cv2.resize(skin_mask, (w//4, h//4))  # Ubah ukuran mask
         frame[h-h//4:h, w-w//4:w] = cv2.cvtColor(skin_display, cv2.COLOR_GRAY2BGR)  # Tempatkan di kanan bawah
-        
         if hand_contour is not None:
             # Gambar kontur
-            cv2.drawContours(frame, [hand_contour], 0, (0, 255, 0), 2)  # Gambar kontur tangan
+            cv2.drawContours(frame, [hand_contour], 0, colors["contour"], 2)  # Gambar kontur tangan
+            
+            # Tambahkan informasi kontur ke panel informasi
+            cv2.putText(combined_frame, "Informasi Kontur:", 
+                       (w + 10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+            
+            # Hitung area dan perimeter untuk ditampilkan
+            area = cv2.contourArea(hand_contour)
+            perimeter = cv2.arcLength(hand_contour, True)
+            all_calculations["area"] = area
+            all_calculations["perimeter"] = perimeter
+            
+            # Tampilkan informasi area dan perimeter pada frame utama
+            put_text_with_background(frame, f"Area: {int(area)}", (10, 60), font, font_scale_small,
+                                    colors["text"], colors["text_bg"], font_thickness_small)    # Tampilkan area dengan latar yang mencolok
+            area_text = f"Area: {int(area)}"
+            text_size, _ = cv2.getTextSize(area_text, font, font_scale_small, font_thickness_small)
+            put_text_with_background(frame, area_text, (10, 60), font, font_scale_small,
+                                    colors["text"], colors["text_bg"], font_thickness_small)
+            
+            # Tambahkan visualisasi normalisasi area
+            normalized_area = area / (w * h)
+            normalized_area_text = f"Norm Area: {normalized_area:.4f}"
+            put_text_with_background(frame, normalized_area_text, (10, 35), font, font_scale_small,
+                                    colors["text"], colors["text_bg"], font_thickness_small)
+            
+            # Tambahkan bar visualisasi untuk normalisasi area
+            draw_metric_bar(frame, (10, 45), 100, 8, normalized_area, 0.5, 
+                            {"bg": colors["text_bg"], "fill": (0, 200, 200), "text": colors["text"]})
+
+            # Tambahkan visualisasi dan penjelasan proses ekstraksi fitur di panel informasi
+            explanation_section_y = h // 2 + 50
+            cv2.putText(combined_frame, "PENJELASAN EKSTRAKSI FITUR (BAHASA INDONESIA):", 
+                        (w + 10, explanation_section_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 100), 1)
+            cv2.line(combined_frame, (w + 10, explanation_section_y + 10), 
+                        (w + 390, explanation_section_y + 10), (255, 255, 100), 1)
+            
+            # Penjelasan proses ekstraksi fitur dalam Bahasa Indonesia
+            explanation_lines = [
+                "1. Normalisasi Area: Luas kontur dibagi dengan luas frame",
+                "   untuk mendapatkan nilai yang konsisten terlepas dari",
+                "   jarak tangan dari kamera.",
+                "",
+                "2. Convexity Ratio: Perbandingan luas kontur dengan luas",
+                "   convex hull. Menunjukkan seberapa 'cekung' bentuk",
+                "   tangan. Jari yang terbuka membuat rasio lebih kecil.",
+                "",
+                "3. Jumlah Jari: Dihitung dari jumlah sudut < 90° pada",
+                "   convexity defects yang berada di antara jari.",
+                "",
+                "4. Jarak Defects: 5 jarak terbesar dari titik defect ke",
+                "   pusat massa, ternormalisasi oleh ukuran frame.",
+                "",
+                "5. Rasio Aspek: Perbandingan lebar dan tinggi kotak",
+                "   pembatas, menunjukkan orientasi tangan.",
+                "",
+                "6. Orientasi: Sudut kemiringan elips yang menyesuaikan",
+                "   dengan kontur tangan, dinormalisasi ke rentang 0-1."
+            ]
+            
+            y_offset = explanation_section_y + 30
+            for line in explanation_lines:
+                cv2.putText(combined_frame, line, 
+                            (w + 15, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+                y_offset += 20
+        
+            cv2.putText(combined_frame, f"Area: {int(area)} pixel²", 
+                        (w + 20, 155), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 255, 150), 1)
+            cv2.putText(combined_frame, f"Perimeter: {int(perimeter)} pixel", 
+                        (w + 20, 175), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 255, 150), 1)
             
             # Temukan convex hull dan defects
             contour, hull, defects = find_convex_hull_and_defects(hand_contour)
             
-            if contour is not None:
-                # Gambar hull
+            if contour is not None:                # Gambar hull
                 if hull is not None:
                     hull_points = [contour[h[0]] for h in hull]  # Dapatkan titik-titik hull
-                    cv2.drawContours(frame, [np.array(hull_points)], 0, (0, 0, 255), 3)  # Gambar hull
+                    cv2.drawContours(frame, [np.array(hull_points)], 0, colors["hull"], 3)  # Gambar hull
+                    
+                    # Hitung dan tampilkan informasi hull
+                    hull_contour = np.array(hull_points)
+                    hull_area = cv2.contourArea(hull_contour)
+                    all_calculations["hull_area"] = hull_area
+                    
+                    # Gambar visualisasi perbandingan convexity (kontur vs hull) di sudut kiri atas
+                    if convexity > 0:
+                        visualize_convexity(frame, contour, hull_points, convexity, (10, 160))
+                    
+                    # Tambahkan overlay untuk menunjukkan area hull vs kontur
+                    # Transparan overlay pada hull area
+                    hull_mask = np.zeros_like(frame)
+                    cv2.drawContours(hull_mask, [hull_contour], 0, (150, 50, 200), -1)
+                    # Lapisi overlay pada frame dengan transparansi
+                    alpha = 0.3  # Tingkat transparansi (0-1)
+                    mask = hull_mask.astype(bool)
+                    frame[mask] = cv2.addWeighted(frame, 0.7, hull_mask, 0.3, 0)[mask]
+                    
+                    # Buat indikator hull-contour pada frame utama
+                    # Tampilkan hull area pada frame utama
+                    put_text_with_background(frame, f"Hull Area: {int(hull_area)}", (10, 85), font, font_scale_small,
+                                           colors["text"], colors["text_bg"], font_thickness_small)
+                    
+                    cv2.putText(combined_frame, f"Hull Area: {int(hull_area)} pixel²", 
+                               (w + 20, 195), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 255), 1)
+                    
+                    # Hitung convexity
+                    if hull_area > 0:
+                        convexity = area / hull_area
+                        all_calculations["convexity"] = convexity
+                        
+                        # Tampilkan convexity pada frame utama dengan bar indikator
+                        convexity_text = f"Convexity: {convexity:.3f}"
+                        put_text_with_background(frame, convexity_text, (10, 110), font, font_scale_small,
+                                               colors["text"], colors["text_bg"], font_thickness_small)
+                        
+                        # Tambahkan bar indikator convexity
+                        draw_metric_bar(frame, (10, 120), 100, 10, convexity, 1.0, 
+                                     {"bg": colors["text_bg"], 
+                                      "fill": colors["convexity_good"] if convexity > 0.9 else 
+                                             colors["convexity_medium"] if convexity > 0.7 else 
+                                             colors["convexity_bad"],
+                                      "text": colors["text"]})
+                        
+                        cv2.putText(combined_frame, f"Convexity: {convexity:.3f}", 
+                                   (w + 20, 215), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 255), 1)
                 
-                # Gambar defects
-                if defects is not None:
+                # Gambar defects dan kumpulkan informasi
+                finger_count = 0
+                defect_distances = []
+                finger_tips = []
+                
+                # Temukan centroid (pusat massa) kontur
+                M = cv2.moments(contour)
+                if M["m00"] != 0:
+                    cx = int(M["m10"] / M["m00"])  # Koordinat x pusat
+                    cy = int(M["m01"] / M["m00"])  # Koordinat y pusat
+                else:
+                    cx, cy = 0, 0
+                
+                # Tampilkan centroid pada frame
+                cv2.circle(frame, (cx, cy), 7, colors["centroid"], -1)
+                cv2.circle(frame, (cx, cy), 9, (255, 255, 255), 1)  # Lingkaran putih di sekitar centroid
+                
+                # Tambahkan label pada centroid
+                put_text_with_background(frame, "Centroid", (cx + 10, cy), font, font_scale_small,
+                                        colors["text"], colors["text_bg"], font_thickness_small)
+                
+                all_calculations["centroid"] = (cx, cy)
+                
+                cv2.putText(combined_frame, f"Pusat Massa: ({cx}, {cy})", 
+                           (w + 20, 235), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 150, 255), 1)
+                
+                # Tampilkan informasi deteksi jari
+                cv2.putText(combined_frame, "Deteksi Jari:", 
+                           (w + 10, 270), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+                
+                # Variabel untuk menyimpan sudut antar jari
+                angles = []
+                
+                if defects is not None and len(defects) > 0:
+                    cv2.putText(combined_frame, f"Jumlah Defects: {defects.shape[0]}", 
+                               (w + 20, 295), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 200, 150), 1)
+                          # Tambahkan jumlah defects pada frame utama
+                    put_text_with_background(frame, f"Defects: {defects.shape[0]}", (10, 135), font, font_scale_small,
+                                           colors["text"], colors["text_bg"], font_thickness_small)
+                    
+                    # Buat visualisasi konveks di kanan atas
+                    convex_viz_height = 130
+                    convex_viz_width = 200
+                    convex_viz_x = w - convex_viz_width - 10
+                    convex_viz_y = 60
+                    
+                    # Buat area visualisasi dengan latar belakang semi-transparan
+                    cv2.rectangle(frame, (convex_viz_x, convex_viz_y), 
+                                 (convex_viz_x + convex_viz_width, convex_viz_y + convex_viz_height), 
+                                 (0, 0, 0, 128), -1)
+                    
+                    # Judul visualisasi
+                    cv2.putText(frame, "Defect Analysis", (convex_viz_x + 5, convex_viz_y + 20), 
+                               font, 0.5, (255, 255, 255), 1)
+                    
                     for i in range(defects.shape[0]):
                         s, e, f, d = defects[i, 0]  # Start, end, far point, dan distance
                         start = tuple(contour[s][0])  # Titik awal
                         end = tuple(contour[e][0])  # Titik akhir
                         far = tuple(contour[f][0])  # Titik terjauh
+                          # Gambar garis dan titik defect pada frame
+                        cv2.line(frame, start, end, colors["defect_line"], 2)  # Gambar garis
+                        cv2.circle(frame, far, 5, colors["defect_point"], -1)  # Gambar lingkaran
                         
-                        # Gambar garis dari start ke end
-                        cv2.line(frame, start, end, [0, 255, 0], 2)  # Gambar garis
+                        # Tambahkan label pada titik far
+                        put_text_with_background(frame, f"D{i+1}", (far[0] + 5, far[1] - 5), font, 
+                                               font_scale_small, colors["text"], colors["text_bg"], font_thickness_small)
                         
-                        # Gambar lingkaran di titik terjauh
-                        cv2.circle(frame, far, 5, [0, 0, 255], -1)  # Gambar lingkaran
+                        # Gambar dan label start dan end sebagai kemungkinan ujung jari
+                        cv2.circle(frame, start, 6, colors["finger_tip"], -1)
+                        cv2.circle(frame, end, 6, colors["finger_tip"], -1)
+                        
+                        # Tambahkan start dan end ke daftar kemungkinan ujung jari
+                        finger_tips.append(start)
+                        finger_tips.append(end)
+                        
+                        # Hitung jarak defect ke pusat
+                        dist_to_center = math.sqrt((far[0] - cx)**2 + (far[1] - cy)**2)
+                        normalized_dist = dist_to_center / math.sqrt(w**2 + h**2)
+                        defect_distances.append(normalized_dist)
+                        
+                        # Tambahkan visualisasi jarak ke panel defect
+                        if i < 5:  # Batasi untuk 5 defects saja untuk visualisasi
+                            # Gambar bar untuk jarak
+                            y_pos = convex_viz_y + 30 + i * 20
+                            draw_metric_bar(frame, 
+                                          (convex_viz_x + 10, y_pos), 
+                                          120, 10, 
+                                          normalized_dist, 
+                                          0.5,  # Nilai maksimum untuk normalisasi
+                                          {"bg": (50, 50, 50), 
+                                           "fill": (0, 150 + i*20, 255 - i*20), 
+                                           "text": (255, 255, 255)},
+                                          f"Dist {i+1}")
+                        
+                        # Hitung sudut untuk deteksi jari
+                        a = math.sqrt((end[0] - start[0])**2 + (end[1] - start[1])**2)
+                        b = math.sqrt((far[0] - start[0])**2 + (far[1] - start[1])**2)
+                        c = math.sqrt((end[0] - far[0])**2 + (end[1] - far[1])**2)
+                          # Hitung sudut menggunakan hukum kosinus
+                        if a*b > 0:
+                            angle_rad = math.acos((b**2 + c**2 - a**2) / (2*b*c))
+                            angle_deg = angle_rad * 180 / math.pi
+                            angles.append(angle_deg)
+                            
+                            # Tampilkan sudut pada frame utama
+                            put_text_with_background(frame, f"{angle_deg:.1f}°", 
+                                                   (far[0] - 40, far[1] + 15), font, font_scale_small,
+                                                   colors["text"], colors["text_bg"], font_thickness_small)
+                            
+                            # Visualisasi sudut dengan garis
+                            # Gambar garis dari titik far ke midpoint antara start dan end
+                            mid_x = (start[0] + end[0]) // 2
+                            mid_y = (start[1] + end[1]) // 2
+                            
+                            # Gambar garis dari far ke tengah busur
+                            cv2.line(frame, far, (mid_x, mid_y), (0, 255, 255), 1, cv2.LINE_AA)
+                            
+                            # Warna berdasarkan sudut (hijau jika <90°, kuning jika <120°, merah jika >120°)
+                            angle_color = (0, 255, 0) if angle_deg < 90 else \
+                                         (0, 255, 255) if angle_deg < 120 else \
+                                         (0, 0, 255)
+                            
+                            # Menggambar busur untuk visualisasi sudut (simplifikasi)
+                            radius = 20
+                            # Hitung vektor unit dari far ke start dan end
+                            vec_s = ((start[0] - far[0])/b, (start[1] - far[1])/b)
+                            vec_e = ((end[0] - far[0])/c, (end[1] - far[1])/c)
+                            
+                            # Gambar busur menggunakan vektor unit
+                            start_angle = math.atan2(vec_s[1], vec_s[0])
+                            end_angle = math.atan2(vec_e[1], vec_e[0])
+                            
+                            # Koreksi sudut jika perlu
+                            if start_angle > end_angle:
+                                start_angle, end_angle = end_angle, start_angle
+                            if end_angle - start_angle > math.pi:
+                                start_angle += 2*math.pi
+                                start_angle, end_angle = end_angle, start_angle
+                            
+                            # Gambar busur untuk menunjukkan sudut
+                            cv2.ellipse(frame, far, (radius, radius), 0, 
+                                       start_angle * 180 / math.pi, 
+                                       end_angle * 180 / math.pi, 
+                                       angle_color, 2)
+                            
+                            # Jika sudut kurang dari 90 derajat, mungkin ini adalah ruang antar jari
+                            if angle_rad <= math.pi/2:
+                                finger_count += 1
                 
-                # Ekstrak fitur dari tangan
+                # Hilangkan duplikat dari ujung jari dengan memeriksa jarak
+                unique_finger_tips = []
+                if finger_tips:
+                    unique_finger_tips.append(finger_tips[0])
+                    for point in finger_tips[1:]:
+                        add_point = True
+                        for unique_point in unique_finger_tips:
+                            distance = math.sqrt((point[0] - unique_point[0])**2 + (point[1] - unique_point[1])**2)
+                            if distance < 20:  # Jika terlalu dekat dengan titik yang sudah ada
+                                add_point = False
+                                break
+                        if add_point:
+                            unique_finger_tips.append(point)
+                
+                # Tampilkan ujung jari yang terdeteksi
+                for i, tip in enumerate(unique_finger_tips):
+                    if i < 5:  # Batasi hingga 5 jari
+                        cv2.circle(frame, tip, 8, colors["finger_tip"], -1)
+                        cv2.circle(frame, tip, 10, (255, 255, 255), 1)  # Lingkaran putih di sekitar ujung jari
+                        put_text_with_background(frame, f"F{i+1}", (tip[0] + 10, tip[1]), font, font_scale_small,
+                                               colors["text"], colors["text_bg"], font_thickness_small)
+                
+                # Tampilkan jumlah jari terdeteksi
+                all_calculations["finger_count"] = finger_count
+                
+                # Tampilkan jumlah jari pada frame utama dengan latar yang mencolok
+                finger_text = f"Jari: {finger_count}"
+                text_size, _ = cv2.getTextSize(finger_text, font, font_scale_medium, font_thickness_medium)
+                put_text_with_background(frame, finger_text, (w - text_size[0] - 10, 60), font, font_scale_medium,
+                                       colors["text"], (0, 100, 0), font_thickness_medium)
+                
+                cv2.putText(combined_frame, f"Jumlah Jari: {finger_count}", 
+                           (w + 20, 315), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 200, 150), 1)
+                
+                # Tampilkan sudut-sudut antar jari (hingga 5)
+                if angles:
+                    angles.sort()
+                    for i in range(min(5, len(angles))):
+                        cv2.putText(combined_frame, f"Sudut {i+1}: {angles[i]:.1f}°", 
+                                   (w + 20, 335 + i*20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 200, 150), 1)
+                
+                # Tampilkan informasi bounding rectangle
+                x, y, width, height = cv2.boundingRect(contour)
+                aspect_ratio = float(width) / height if height > 0 else 0
+                all_calculations["aspect_ratio"] = aspect_ratio
+                
+                # Gambar bounding rectangle pada frame
+                cv2.rectangle(frame, (x, y), (x+width, y+height), colors["bounding_box"], 2)
+                
+                # Tampilkan dimensi bounding box pada frame utama
+                put_text_with_background(frame, f"W:{width} H:{height}", (x, y-10), font, font_scale_small,
+                                       colors["text"], colors["text_bg"], font_thickness_small)
+                
+                # Tampilkan aspect ratio pada frame utama
+                put_text_with_background(frame, f"Ratio: {aspect_ratio:.2f}", (x, y+height+15), font, font_scale_small,
+                                       colors["text"], colors["text_bg"], font_thickness_small)
+                
+                cv2.putText(combined_frame, "Bounding Rectangle:", 
+                           (w + 10, 435), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+                cv2.putText(combined_frame, f"Width: {width}, Height: {height}", 
+                           (w + 20, 460), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 255, 200), 1)
+                cv2.putText(combined_frame, f"Aspect Ratio: {aspect_ratio:.3f}", 
+                           (w + 20, 480), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 255, 200), 1)
+                
+                # Tampilkan informasi orientasi elips jika kontur cukup besar
+                if len(contour) >= 5:
+                    (x_el, y_el), (MA, ma), angle = cv2.fitEllipse(contour)
+                    # Gambar elips pada frame
+                    cv2.ellipse(frame, ((int(x_el), int(y_el)), (int(MA), int(ma)), int(angle)), colors["ellipse"], 2)
+                    
+                    # Tampilkan data elips pada frame utama
+                    put_text_with_background(frame, f"Elips: {angle:.1f}°", (int(x_el) - 40, int(y_el) - 15), font, 
+                                           font_scale_small, colors["text"], colors["text_bg"], font_thickness_small)
+                    
+                    all_calculations["ellipse_angle"] = angle
+                    all_calculations["ellipse_major_axis"] = MA
+                    all_calculations["ellipse_minor_axis"] = ma
+                    
+                    cv2.putText(combined_frame, "Orientasi Elips:", 
+                               (w + 10, 515), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+                    cv2.putText(combined_frame, f"Angle: {angle:.1f}°", 
+                               (w + 20, 540), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 200), 1)
+                    cv2.putText(combined_frame, f"Major Axis: {MA:.1f}, Minor Axis: {ma:.1f}", 
+                               (w + 20, 560), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 200), 1)
+                  # Ekstrak fitur dari tangan
                 features = extract_features(contour, defects, frame.shape)  # Ekstrak fitur
-                
                 if features:
+                    # Tampilkan tabel fitur terukur di kanan bawah frame
+                    feature_table_height = 160
+                    feature_table_width = 200
+                    feature_table_x = w - feature_table_width - 10
+                    feature_table_y = h - feature_table_height - 10
+                    
+                    # Latar belakang semi-transparan untuk tabel
+                    overlay = frame.copy()
+                    cv2.rectangle(overlay, 
+                                 (feature_table_x, feature_table_y), 
+                                 (feature_table_x + feature_table_width, feature_table_y + feature_table_height), 
+                                 (30, 30, 30), -1)
+                    # Terapkan transparansi
+                    cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+                    
+                    # Judul tabel
+                    cv2.putText(frame, "FEATURE MEASUREMENTS", 
+                               (feature_table_x + 10, feature_table_y + 20), 
+                               font, 0.5, (255, 255, 255), 1)
+                    cv2.line(frame, 
+                            (feature_table_x + 10, feature_table_y + 25), 
+                            (feature_table_x + feature_table_width - 10, feature_table_y + 25), 
+                            (255, 255, 255), 1)
+                    
+                    # Nama dan nilai fitur
+                    feature_names = [
+                        "Normalized Area",
+                        "Convexity Ratio",
+                        "Finger Count",
+                        "Max Defect Dist",
+                        "Aspect Ratio",
+                        "Orientation"
+                    ]
+                    
+                    feature_values = [
+                        features[0],
+                        features[1],
+                        features[2],
+                        max(features[3:8]) if len(features) > 3 else 0,
+                        features[8] if len(features) > 8 else 0,
+                        features[9] if len(features) > 9 else 0
+                    ]
+                    
+                    # Rangkai untuk visualisasi
+                    for i, (name, value) in enumerate(zip(feature_names, feature_values)):
+                        y_pos = feature_table_y + 45 + i * 20
+                        
+                        # Nama fitur
+                        cv2.putText(frame, name, 
+                                   (feature_table_x + 15, y_pos), 
+                                   font, 0.4, (200, 200, 200), 1)
+                        
+                        # Nilai fitur dengan bar visual
+                        max_vals = [0.5, 1.0, 5.0, 0.5, 3.0, 1.0]  # Nilai max untuk setiap fitur
+                        
+                        # Cari warna berdasarkan nilai
+                        color_val = min(255, int(value / max_vals[i] * 255)) if max_vals[i] > 0 else 0
+                        bar_color = (0, color_val, 255-color_val)
+                        
+                        # Gambar bar untuk nilai
+                        bar_width = min(int(value / max_vals[i] * 70), 70) if max_vals[i] > 0 else 0
+                        cv2.rectangle(frame, 
+                                     (feature_table_x + 125, y_pos - 10), 
+                                     (feature_table_x + 125 + bar_width, y_pos - 4), 
+                                     bar_color, -1)
+                        
+                        # Nilai numerik
+                        if isinstance(value, int):
+                            value_text = f"{value}"
+                        else:
+                            value_text = f"{value:.3f}"
+                        cv2.putText(frame, value_text, 
+                                   (feature_table_x + 125 + 75, y_pos), 
+                                   font, 0.4, (255, 255, 255), 1)
+                    
                     # Jika mengumpulkan data, tambahkan ke set pelatihan
                     if collecting_data:
                         # Tambah sampel ke data pelatihan
@@ -721,6 +1304,29 @@ try:
                         # Batasi laju pengumpulan
                         time.sleep(0.1)  # Jeda 0.1 detik
                     
+                    # Tampilkan semua fitur di panel informasi
+                    cv2.putText(combined_frame, "Fitur Terektraksi:", 
+                               (w + 10, 590), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+                    
+                    # Nama-nama fitur untuk ditampilkan
+                    feature_names = [
+                        "Normalized Area",
+                        "Convexity Ratio",
+                        "Finger Count",
+                        "Defect Distance 1",
+                        "Defect Distance 2",
+                        "Defect Distance 3",
+                        "Defect Distance 4",
+                        "Defect Distance 5",
+                        "Aspect Ratio",
+                        "Orientation"
+                    ]
+                    
+                    # Tampilkan nilai fitur
+                    for i in range(min(len(features), len(feature_names))):
+                        cv2.putText(combined_frame, f"{feature_names[i]}: {features[i]:.4f}", 
+                                   (w + 20, 615 + i*20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 255, 255), 1)
+                    
                     # Jika model dimuat, prediksi gerakan
                     if model_loaded and classifier.trained:
                         try:
@@ -732,27 +1338,141 @@ try:
                             
                             # Dapatkan probabilitas untuk setiap kelas
                             probabilities = classifier.predict_proba(features_array)[0]  # Probabilitas
-                            
-                            # Hanya terima prediksi dengan keyakinan di atas 0.4 (40%)
+                              # Hanya terima prediksi dengan keyakinan di atas 0.4 (40%)
                             max_prob = np.max(probabilities)  # Probabilitas maksimum
                             if max_prob > 0.4:
                                 # Dapatkan kelas dengan probabilitas tertinggi
                                 prediction = np.argmax(probabilities)  # Kelas terprediksi
                                 # Konversi prediksi ke nama gerakan
                                 status_text = gesture_classes.get(prediction, "Unknown gesture")  # Teks status
+                                
+                                # Tampilkan status dengan latar penuh di pojok kiri atas frame
+                                text_size, _ = cv2.getTextSize(status_text, font, font_scale_large, font_thickness_large)
+                                
+                                # Buat latar belakang dengan warna yang berbeda sesuai gerakan
+                                bg_color = (0, 100, 0)  # Default: hijau gelap
+                                if prediction == 1:  # Play/Pause
+                                    bg_color = (0, 120, 0)  # Hijau
+                                elif prediction == 2:  # Stop
+                                    bg_color = (0, 0, 120)  # Merah
+                                elif prediction == 3:  # Next Track
+                                    bg_color = (120, 0, 0)  # Biru
+                                elif prediction == 4:  # Previous Track
+                                    bg_color = (0, 120, 120)  # Kuning
+                                elif prediction == 5:  # Volume Up
+                                    bg_color = (120, 0, 120)  # Ungu
+                                elif prediction == 6:  # Volume Down
+                                    bg_color = (120, 120, 0)  # Cyan
+                                
+                                # Gambar latar belakang yang lebih lebar
+                                cv2.rectangle(frame, (0, 0), (text_size[0] + 40, 40), bg_color, -1)
+                                
+                                # Gambar indikator keyakinan
+                                confidence_width = int(max_prob * (text_size[0] + 40))
+                                cv2.rectangle(frame, (0, 40), (confidence_width, 45), (255, 255, 255), -1)
+                                
+                                # Gambar teks dengan warna putih
+                                cv2.putText(frame, status_text, (10, 30), font, font_scale_large, (255, 255, 255), font_thickness_large)
                             else:
                                 # Jika tidak ada kelas dengan keyakinan di atas 40%, jangan kenali gerakan
                                 prediction = 0  # Reset prediksi
                                 status_text = "No gesture detected (low confidence)"  # Teks status
+                                
+                                # Tampilkan status dengan latar transparan
+                                cv2.rectangle(frame, (0, 0), (400, 40), (50, 50, 50), -1)
+                                cv2.putText(frame, status_text, (10, 30), font, font_scale_large, (150, 150, 150), font_thickness_large)
                             
-                            # Tampilkan probabilitas prediksi
+                            # Tampilkan judul hasil klasifikasi
+                            y_prob_start = max(615 + len(feature_names)*20, h//2)
+                            cv2.putText(combined_frame, "Hasil Klasifikasi SVM:", 
+                                       (w + 10, y_prob_start), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
+                            cv2.line(combined_frame, (w + 10, y_prob_start + 10), (w + 290, y_prob_start + 10), (0, 255, 255), 1)
+                              # Tampilkan probabilitas prediksi dalam bentuk bar chart
+                            max_bar_width = 150
                             for i, prob in enumerate(probabilities):
-                                if i < len(gesture_classes) and prob > 0.05:  # Hanya tampilkan probabilitas signifikan
-                                    prob_text = f"{gesture_classes.get(i, 'Unknown')}: {prob:.2f}"  # Teks probabilitas
-                                    # Sorot prediksi terpilih dengan warna berbeda
-                                    text_color = (0, 0, 255) if prob > 0.4 else (255, 0, 0)  # Warna teks
-                                    cv2.putText(frame, prob_text, 
-                                                (w - 300, 30 + i*30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 1)
+                                if i < len(gesture_classes):
+                                    # Teks kelas
+                                    class_text = f"{gesture_classes.get(i, 'Unknown')}"
+                                    cv2.putText(combined_frame, class_text, 
+                                               (w + 20, y_prob_start + 35 + i*25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, 
+                                               (255, 255, 255), 1)
+                                    
+                                    # Bar probabilitas
+                                    bar_width = int(prob * max_bar_width)
+                                    bar_color = (0, 0, 255) if prob > 0.4 else (0, 165, 255)
+                                    
+                                    # Background bar (gray)
+                                    cv2.rectangle(combined_frame, 
+                                                 (w + 170, y_prob_start + 25 + i*25), 
+                                                 (w + 170 + max_bar_width, y_prob_start + 45 + i*25), 
+                                                 (70, 70, 70), -1)
+                                    
+                                    # Foreground bar (colored by probability)
+                                    if bar_width > 0:
+                                        cv2.rectangle(combined_frame, 
+                                                     (w + 170, y_prob_start + 25 + i*25), 
+                                                     (w + 170 + bar_width, y_prob_start + 45 + i*25), 
+                                                     bar_color, -1)
+                                    
+                                    # Probabilitas sebagai persentase
+                                    prob_text = f"{prob:.1%}"
+                                    text_x = w + 175 + bar_width if bar_width > 0 else w + 175
+                                    cv2.putText(combined_frame, prob_text, 
+                                               (text_x, y_prob_start + 40 + i*25), cv2.FONT_HERSHEY_SIMPLEX, 
+                                               0.5, (255, 255, 255), 1)
+                            
+                            # Tampilkan tabel fitur di sudut kanan bawah frame kamera
+                            if max_prob > 0.3:  # Tampilkan fitur jika ada probabilitas yang signifikan
+                                # Buat area untuk tabel fitur (kotak semi-transparan)
+                                feature_table_height = 160
+                                feature_table_width = 200
+                                feature_table_x = w - feature_table_width - 10
+                                feature_table_y = h - feature_table_height - 10
+                                
+                                # Gambar latar belakang tabel
+                                overlay = frame.copy()
+                                cv2.rectangle(overlay, 
+                                             (feature_table_x, feature_table_y), 
+                                             (feature_table_x + feature_table_width, feature_table_y + feature_table_height), 
+                                             (30, 30, 30), -1)
+                                
+                                # Terapkan transparansi
+                                alpha = 0.7
+                                cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+                                
+                                # Judul tabel
+                                cv2.putText(frame, "FITUR UTAMA", 
+                                           (feature_table_x + 10, feature_table_y + 20), 
+                                           font, font_scale_small, (0, 255, 255), font_thickness_small)
+                                
+                                # Tampilkan fitur-fitur utama dengan nilai yang sudah dibulatkan
+                                feature_names_short = ["Area", "Convexity", "Fingers", "Aspect", "Angle"]
+                                feature_values = [
+                                    f"{features[0]:.4f}",    # Normalized area
+                                    f"{features[1]:.4f}",    # Convexity
+                                    f"{int(features[2])}",   # Finger count
+                                    f"{features[8]:.4f}",    # Aspect ratio
+                                    f"{features[9]:.4f}"     # Orientation
+                                ]
+                                
+                                # Gambar garis header
+                                cv2.line(frame, 
+                                        (feature_table_x + 5, feature_table_y + 25), 
+                                        (feature_table_x + feature_table_width - 5, feature_table_y + 25), 
+                                        (0, 255, 255), 1)
+                                
+                                # Tampilkan fitur dalam format tabel
+                                for i, (name, value) in enumerate(zip(feature_names_short, feature_values)):
+                                    y_pos = feature_table_y + 50 + i * 20
+                                    # Nama fitur
+                                    cv2.putText(frame, name, 
+                                               (feature_table_x + 10, y_pos), 
+                                               font, font_scale_small, (200, 200, 200), font_thickness_small)
+                                    
+                                    # Nilai fitur
+                                    cv2.putText(frame, value, 
+                                               (feature_table_x + 100, y_pos), 
+                                               font, font_scale_small, (255, 255, 255), font_thickness_small)
                             
                             # Jalankan aksi berdasarkan gerakan yang diprediksi
                             if max_prob > 0.4:
@@ -796,21 +1516,26 @@ try:
                                 previous_gesture = status_text  # Simpan gerakan saat ini
                         except Exception as e:
                             print(f"Error selama prediksi: {e}")
-                    
-                    # Tampilkan fitur yang diekstrak
-                    for i in range(min(6, len(features))):
-                        cv2.putText(frame, f"F{i}: {features[i]:.3f}", 
-                                    (10, 60 + i*30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                            cv2.putText(combined_frame, f"Error: {str(e)}", 
+                                       (w + 20, h - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
         
-        # Tampilkan teks status
-        cv2.putText(frame, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)  # Teks status utama
-        cv2.putText(frame, "Klasifikasi SVM", (w - 200, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)  # Label SVM
+        # Tampilkan mode pengumpulan data jika aktif
+        if collecting_data:
+            collection_text = f"Pengumpulan Data: Kelas {current_collection_class} - {gesture_classes[current_collection_class]}"
+            # Latar belakang untuk teks pengumpulan data
+            cv2.rectangle(frame, (0, h-60), (w, h-25), (0, 0, 150), -1)
+            cv2.putText(frame, collection_text, (10, h-35), font, font_scale_medium, (255, 255, 255), font_thickness_medium)
+            
+            # Hitung sampel untuk kelas saat ini
+            current_class_count = sum(1 for label in training_labels if label == current_collection_class)
+            cv2.putText(frame, f"Sampel kelas: {current_class_count}", 
+                        (10, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
         
         # Tampilkan judul untuk skin mask
         cv2.putText(frame, "Mask Kulit", (w - w//4, h - h//4 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
         
-        # Tampilkan frame
-        cv2.imshow("Kontrol Media Gerakan Tangan dengan SVM Kustom", frame)  # Tampilkan frame
+        # Tampilkan frame gabungan
+        cv2.imshow("Kontrol Media Gerakan Tangan dengan SVM Kustom", combined_frame)  # Tampilkan frame
         
         # Periksa penekanan tombol
         key = cv2.waitKey(1) & 0xFF  # Tunggu tombol
